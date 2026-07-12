@@ -67,6 +67,87 @@ public partial class MainForm : Form
             if (_tabs.SelectedTab != null)
                 _currentTarget = _tabs.SelectedTab.Text;
         };
+
+        // Middle-click closes a tab
+        _tabs.MouseDown += (s, e) =>
+        {
+            if (e.Button == MouseButtons.Middle)
+                CloseTabAt(e.Location);
+        };
+
+        // Right-click shows context menu on tabs
+        var tabMenu = new ContextMenuStrip();
+        var closeItem = new ToolStripMenuItem("Close");
+        closeItem.Click += (s, e) => CloseTabAt(_tabs.PointToClient(Cursor.Position));
+        tabMenu.Items.Add(closeItem);
+        _tabs.MouseDown += (s, e) =>
+        {
+            if (e.Button == MouseButtons.Right)
+            {
+                var tab = TabPageAt(e.Location);
+                if (tab != null && tab.Text != "(server)")
+                    tabMenu.Show(_tabs, e.Location);
+            }
+        };
+
+        // Ctrl+A selects all text in the input box
+        _inputBox.KeyDown += (s, e) =>
+        {
+            if (e.Control && e.KeyCode == Keys.A)
+            {
+                _inputBox.SelectAll();
+                e.SuppressKeyPress = true;
+            }
+        };
+
+        // Right-click context menu on input box (cut/copy/paste/select all)
+        var inputMenu = new ContextMenuStrip();
+        inputMenu.Items.Add("Cut",    null, (s, e) => _inputBox.Cut());
+        inputMenu.Items.Add("Copy",   null, (s, e) => _inputBox.Copy());
+        inputMenu.Items.Add("Paste",  null, (s, e) => _inputBox.Paste());
+        inputMenu.Items.Add(new ToolStripSeparator());
+        inputMenu.Items.Add("Select All", null, (s, e) => _inputBox.SelectAll());
+        inputMenu.Opening += (s, e) =>
+        {
+            inputMenu.Items[0].Enabled = _inputBox.SelectionLength > 0;
+            inputMenu.Items[1].Enabled = _inputBox.SelectionLength > 0;
+            inputMenu.Items[2].Enabled = Clipboard.ContainsText();
+        };
+        _inputBox.ContextMenuStrip = inputMenu;
+    }
+
+    private TabPage? TabPageAt(Point p)
+    {
+        for (int i = 0; i < _tabs.TabCount; i++)
+            if (_tabs.GetTabRect(i).Contains(p))
+                return _tabs.TabPages[i];
+        return null;
+    }
+
+    private async void CloseTabAt(Point p)
+    {
+        var tab = TabPageAt(p);
+        if (tab == null || tab.Text == "(server)") return;
+        await CloseTab(tab.Text);
+    }
+
+    private async Task CloseTab(string name)
+    {
+        if (!_channels.TryGetValue(name, out var ch)) return;
+
+        // Send PART for channels we're in
+        if (_irc != null && _irc.IsConnected && (name.StartsWith('#') || name.StartsWith('&')))
+            await _irc.PartAsync(name);
+
+        _channels.Remove(name);
+        _tabs.TabPages.Remove(ch.tab);
+
+        if (_currentTarget.Equals(name, StringComparison.OrdinalIgnoreCase))
+        {
+            _currentTarget = "(server)";
+            if (_channels.TryGetValue("(server)", out var srv))
+                _tabs.SelectedTab = srv.tab;
+        }
     }
 
     private void BuildConnectPanel()
@@ -213,6 +294,19 @@ public partial class MainForm : Form
                 var nick = msg.PrefixNick ?? "";
                 var reason = msg.Params.Length > 1 ? msg.Params[1] : "";
                 AppendLine(channel, $"*** {nick} left {channel} ({reason})", Color.LightSalmon);
+                // If it's us parting and the tab is still open (e.g. via /part command), close it
+                if (nick.Equals(_irc?.CurrentNick, StringComparison.OrdinalIgnoreCase)
+                    && _channels.TryGetValue(channel, out var ch))
+                {
+                    _channels.Remove(channel);
+                    _tabs.TabPages.Remove(ch.tab);
+                    if (_currentTarget.Equals(channel, StringComparison.OrdinalIgnoreCase))
+                    {
+                        _currentTarget = "(server)";
+                        if (_channels.TryGetValue("(server)", out var srv))
+                            _tabs.SelectedTab = srv.tab;
+                    }
+                }
                 break;
             }
 
