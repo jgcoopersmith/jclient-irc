@@ -96,8 +96,8 @@ public class IrcConnection : IDisposable
         await _tcp.ConnectAsync(host, port);
 
         var stream = _tcp.GetStream();
-        _reader = new StreamReader(stream, Encoding.UTF8);
-        _writer = new StreamWriter(stream, Encoding.UTF8) { AutoFlush = true, NewLine = "\r\n" };
+        _reader = new StreamReader(stream, new UTF8Encoding(false));
+        _writer = new StreamWriter(stream, new UTF8Encoding(false)) { AutoFlush = true, NewLine = "\r\n" };
 
         CurrentNick = nick;
         _cts = new CancellationTokenSource();
