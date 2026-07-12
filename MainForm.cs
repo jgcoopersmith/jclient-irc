@@ -75,10 +75,15 @@ public partial class MainForm : Form
                 CloseTabAt(e.Location);
         };
 
-        // Right-click shows context menu on tabs
+        // Right-click shows context menu on the specific tab that was clicked
+        TabPage? _rightClickedTab = null;
         var tabMenu = new ContextMenuStrip();
         var closeItem = new ToolStripMenuItem("Close");
-        closeItem.Click += (s, e) => CloseTabAt(_tabs.PointToClient(Cursor.Position));
+        closeItem.Click += async (s, e) =>
+        {
+            if (_rightClickedTab != null)
+                await CloseTab(_rightClickedTab.Text);
+        };
         tabMenu.Items.Add(closeItem);
         _tabs.MouseDown += (s, e) =>
         {
@@ -86,7 +91,10 @@ public partial class MainForm : Form
             {
                 var tab = TabPageAt(e.Location);
                 if (tab != null && tab.Text != "(server)")
+                {
+                    _rightClickedTab = tab;
                     tabMenu.Show(_tabs, e.Location);
+                }
             }
         };
 
