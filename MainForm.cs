@@ -22,7 +22,7 @@ public partial class MainForm : Form
 
     // Server panel controls
     private readonly Panel _connectPanel = new() { Dock = DockStyle.Top, Height = 80, Padding = new Padding(8) };
-    private readonly TextBox _serverBox = new() { Text = "irc.libera.chat", Width = 200 };
+    private readonly TextBox _serverBox = new() { Text = "irc.rizon.net", Width = 200 };
     private readonly TextBox _portBox = new() { Text = "6667", Width = 60 };
     private readonly TextBox _nickBox = new() { Text = "IRCUser" + new Random().Next(100, 999), Width = 110 };
     private readonly TextBox _passBox = new() { PlaceholderText = "Password (optional)", Width = 150, PasswordChar = '*' };
@@ -258,6 +258,21 @@ public partial class MainForm : Form
                 AppendLine(channel, $"*** {msg.PrefixNick} kicked {kicked} ({reason})", Color.OrangeRed);
                 break;
             }
+
+            // ERR_NOTREGISTERED — server requires NickServ/SASL (e.g. Libera Chat)
+            case "451":
+                AppendLine("(server)", "*** Server requires registration. Try a different server (e.g. irc.rizon.net) or register your nick.", Color.Orange);
+                break;
+
+            // ERR_NICKNAMEINUSE
+            case "433":
+                AppendLine("(server)", $"*** Nick already in use: {msg.Params.LastOrDefault()}", Color.Orange);
+                break;
+
+            // ERR_BADCHANNELKEY / ERR_INVITEONLYCHAN / ERR_BANNEDFROMCHAN
+            case "475": case "473": case "474":
+                AppendLine("(server)", $"*** Cannot join channel: {string.Join(" ", msg.Params.Skip(1))}", Color.Orange);
+                break;
 
             default:
                 // Show numeric replies and unknown commands in server tab
