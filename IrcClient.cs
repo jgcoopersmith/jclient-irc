@@ -155,6 +155,12 @@ public class IrcConnection : IDisposable
                 if (msg.Command == "001" && msg.Params.Length > 0)
                     CurrentNick = msg.Params[0];
 
+                // Track our own /nick changes so CurrentNick stays accurate
+                if (msg.Command == "NICK" && msg.Params.Length > 0
+                    && msg.PrefixNick != null
+                    && msg.PrefixNick.Equals(CurrentNick, StringComparison.OrdinalIgnoreCase))
+                    CurrentNick = msg.Params[0];
+
                 _ctx.Post(_ =>
                 {
                     RawLineReceived?.Invoke(raw);

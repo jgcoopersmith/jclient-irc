@@ -8,9 +8,14 @@ public partial class MainForm : Form
     private IrcConnection? _irc;
     private bool _connecting;
 
-    // Channel tabs: channel name -> (TabPage, RichTextBox)
-    private readonly Dictionary<string, (TabPage tab, RichTextBox log)> _channels = new(StringComparer.OrdinalIgnoreCase);
+    // Channel tabs: channel name -> (TabPage, header label, RichTextBox)
+    private readonly Dictionary<string, (TabPage tab, Label header, RichTextBox log)> _channels = new(StringComparer.OrdinalIgnoreCase);
     private string _currentTarget = "";
+
+    // Channel topics (from 332 on join and TOPIC changes) and the server we're
+    // connected to, both shown in every window's header line.
+    private readonly Dictionary<string, string> _topics = new(StringComparer.OrdinalIgnoreCase);
+    private string? _activeServer;
 
     // Tabs that received messages while not the active tab; drawn highlighted
     // until the user opens them.
@@ -296,6 +301,7 @@ public partial class MainForm : Form
         _channels.Remove(name);
         _unreadTabs.Remove(name);
         _ctrlSelectedTabs.Remove(name);
+        _topics.Remove(name);
         _tabs.TabPages.Remove(ch.tab);
 
         if (_currentTarget.Equals(name, StringComparison.OrdinalIgnoreCase))
@@ -349,13 +355,14 @@ public partial class MainForm : Form
             var log = _channels[name].log;
             var header = new Label
             {
-                Text = name,
+                Text = ComposeHeader(name),
                 Dock = DockStyle.Top,
                 Height = LogicalToDeviceUnits(20),
                 TextAlign = ContentAlignment.MiddleLeft,
                 BackColor = Color.FromArgb(45, 45, 60),
                 ForeColor = Color.LightGray,
                 Padding = new Padding(LogicalToDeviceUnits(4), 0, 0, 0),
+                AutoEllipsis = true,
                 ContextMenuStrip = _splitMenu
             };
             var pane = new Panel { Dock = DockStyle.Fill, Margin = new Padding(LogicalToDeviceUnits(1)), ContextMenuStrip = _splitMenu };
@@ -577,7 +584,7 @@ public partial class MainForm : Form
         }
     }
 
-    private RichTextBox AddChannelTab(string name)
+    private void AddChannelTab(string name)
     {
         var log = new RichTextBox
         {
@@ -595,17 +602,52 @@ public partial class MainForm : Form
             if (InSplitMode && _splitChannels.Contains(name, StringComparer.OrdinalIgnoreCase))
                 SetSplitCurrentTarget(name);
         };
+        // Per-window header: "<name>     <nick> @ <server>     <topic>"
+        var header = new Label
+        {
+            Text = ComposeHeader(name),
+            Dock = DockStyle.Top,
+            Height = LogicalToDeviceUnits(20),
+            TextAlign = ContentAlignment.MiddleLeft,
+            BackColor = Color.FromArgb(45, 45, 60),
+            ForeColor = Color.LightGray,
+            Padding = new Padding(LogicalToDeviceUnits(4), 0, 0, 0),
+            AutoEllipsis = true
+        };
         var tab = new TabPage(name);
         tab.Controls.Add(log);
+        tab.Controls.Add(header);
         _tabs.TabPages.Add(tab);
-        _channels[name] = (tab, log);
-        return log;
+        _channels[name] = (tab, header, log);
+    }
+
+    private string ComposeHeader(string name)
+    {
+        var gap = new string(' ', 5);
+        var text = name;
+        if (_irc is { IsConnected: true, CurrentNick: not null } && _activeServer != null)
+            text += $"{gap}{_irc.CurrentNick} @ {_activeServer}";
+        if (_topics.TryGetValue(name, out var topic) && topic.Length > 0)
+            text += $"{gap}{topic}";
+        return text;
+    }
+
+    // Refreshes every window's header (tab views and split panes alike)
+    private void UpdateAllHeaders()
+    {
+        foreach (var (name, ch) in _channels)
+            ch.header.Text = ComposeHeader(name);
+        foreach (var (name, label) in _splitHeaders)
+            label.Text = ComposeHeader(name);
     }
 
     private void AppendLine(string target, string text, Color? color = null)
     {
         if (!_channels.TryGetValue(target, out var ch))
-            ch = (default!, AddChannelTab(target));
+        {
+            AddChannelTab(target);
+            ch = _channels[target];
+        }
 
         var log = ch.log;
         var ts = DateTime.Now.ToString("HH:mm");
@@ -641,6 +683,8 @@ public partial class MainForm : Form
             if (_irc != conn) return;
             _statusLabel.Text = "Disconnected";
             _disconnectBtn.Enabled = false;
+            _activeServer = null;
+            UpdateAllHeaders();
             AppendLine("(server)", "*** Disconnected", Color.Orange);
             if (_settings.ReconnectOnDisconnect)
                 _ = ReconnectAsync(conn, c);
@@ -653,6 +697,8 @@ public partial class MainForm : Form
                 string.IsNullOrWhiteSpace(c.Password) ? null : c.Password);
             _statusLabel.Text = $"Connected to {c.Server} as {c.Nick}";
             _disconnectBtn.Enabled = true;
+            _activeServer = c.Server;
+            UpdateAllHeaders();
         }
         catch (Exception ex)
         {
@@ -688,6 +734,8 @@ public partial class MainForm : Form
         // that handler ignores events from connections that are no longer
         // current, and _irc is already null by the time its callback runs.
         _statusLabel.Text = "Disconnected";
+        _activeServer = null;
+        UpdateAllHeaders();
         AppendLine("(server)", "*** Disconnected", Color.Orange);
     }
 
@@ -706,6 +754,7 @@ public partial class MainForm : Form
                         _ = _irc.JoinAsync(channel.StartsWith('#') || channel.StartsWith('&') ? channel : $"#{channel}");
                     _pendingAutoJoinChannels.Clear();
                 }
+                UpdateAllHeaders(); // server may have adjusted our nick during registration
                 break;
 
             case "372": // RPL_MOTD
@@ -750,6 +799,7 @@ public partial class MainForm : Form
                     _channels.Remove(channel);
                     _unreadTabs.Remove(channel);
                     _ctrlSelectedTabs.Remove(channel);
+                    _topics.Remove(channel);
                     _tabs.TabPages.Remove(ch.tab);
                     if (_currentTarget.Equals(channel, StringComparison.OrdinalIgnoreCase))
                     {
@@ -777,6 +827,7 @@ public partial class MainForm : Form
                 var newNick = msg.Params[0];
                 foreach (var kv in _channels)
                     AppendLine(kv.Key, $"*** {oldNick} is now {newNick}", Color.Plum);
+                UpdateAllHeaders(); // IrcConnection tracks our own nick changes
                 break;
             }
 
@@ -785,6 +836,38 @@ public partial class MainForm : Form
                 var channel = msg.Params.Length > 2 ? msg.Params[2] : "";
                 var names = msg.Params.LastOrDefault() ?? "";
                 AppendLine(channel, $"*** Users: {names}", Color.DimGray);
+                break;
+            }
+
+            case "332": // RPL_TOPIC — sent on join when the channel has a topic
+            {
+                var channel = msg.Params.Length > 1 ? msg.Params[1] : "";
+                var topic = msg.Params.LastOrDefault() ?? "";
+                if (channel.Length > 0)
+                {
+                    _topics[channel] = topic;
+                    AppendLine(channel, $"*** Topic: {topic}", Color.DimGray);
+                    UpdateAllHeaders();
+                }
+                break;
+            }
+
+            case "331": // RPL_NOTOPIC
+            {
+                var channel = msg.Params.Length > 1 ? msg.Params[1] : "";
+                if (channel.Length > 0 && _topics.Remove(channel))
+                    UpdateAllHeaders();
+                break;
+            }
+
+            case "TOPIC": // someone changed the topic
+            {
+                var channel = msg.Params[0];
+                var topic = msg.Params.Length > 1 ? msg.Params[1] : "";
+                if (topic.Length > 0) _topics[channel] = topic;
+                else _topics.Remove(channel);
+                AppendLine(channel, $"*** {msg.PrefixNick ?? "server"} set topic: {topic}", Color.Plum);
+                UpdateAllHeaders();
                 break;
             }
 
