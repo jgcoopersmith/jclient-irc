@@ -102,6 +102,15 @@ public partial class MainForm : Form
         connectOptions.DropDownItems.Add(connectOnStartupItem);
         connectOptions.DropDownItems.Add(reconnectOnDisconnectItem);
         optionsItem.DropDownItems.Add(connectOptions);
+        var aboutOptions = new ToolStripMenuItem("About");
+        // Version comes from <Version> in the csproj; strip any "+commit" suffix
+        // the SDK appends to the informational version.
+        var version = Application.ProductVersion;
+        int plusIdx = version.IndexOf('+');
+        if (plusIdx >= 0) version = version[..plusIdx];
+        aboutOptions.DropDownItems.Add(new ToolStripMenuItem("jclient irc for Windows by j0ker") { Enabled = false });
+        aboutOptions.DropDownItems.Add(new ToolStripMenuItem($"version {version}") { Enabled = false });
+        optionsItem.DropDownItems.Add(aboutOptions);
         var exitItem = new ToolStripMenuItem("Exit");
         exitItem.Click += (s, e) => Close();
         fileMenu.DropDownItems.Add(disconnectItem);
