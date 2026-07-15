@@ -10,7 +10,7 @@ public class ConnectionEditForm : Form
     private readonly TextBox _serverBox = new() { Dock = DockStyle.Fill };
     private readonly TextBox _portBox = new() { Dock = DockStyle.Fill };
     private readonly TextBox _nickBox = new() { Dock = DockStyle.Fill };
-    private readonly TextBox _passBox = new() { Dock = DockStyle.Fill, PasswordChar = '*' };
+    private readonly TextBox _passBox = new() { Dock = DockStyle.Fill, PasswordChar = '*', PlaceholderText = "optional" };
     private readonly TextBox _channelsBox = new() { Dock = DockStyle.Fill };
 
     public SavedConnection Result { get; private set; } = new();
@@ -28,7 +28,7 @@ public class ConnectionEditForm : Form
         StartPosition = FormStartPosition.CenterParent;
         Font = new Font("Segoe UI", 9);
         ClientSize = LogicalToDeviceUnits(new Size(320, 275));
-        Icon = AppIcon.Load();
+        Icon = AppIcon.Get();
 
         if (existing != null)
         {
@@ -41,6 +41,7 @@ public class ConnectionEditForm : Form
         }
         else
         {
+            _serverBox.Text = "irc.rizon.net";
             _portBox.Text = "6667";
             _nickBox.Text = "IRCUser" + new Random().Next(100, 999);
         }

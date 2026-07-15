@@ -6,6 +6,7 @@ namespace IRCClient;
 public partial class MainForm : Form
 {
     private IrcConnection? _irc;
+    private bool _connecting;
 
     // Channel tabs: channel name -> (TabPage, RichTextBox)
     private readonly Dictionary<string, (TabPage tab, RichTextBox log)> _channels = new(StringComparer.OrdinalIgnoreCase);
@@ -47,7 +48,7 @@ public partial class MainForm : Form
         Font = new Font("Segoe UI", 9);
         Size = LogicalToDeviceUnits(new Size(900, 650));
         MinimumSize = LogicalToDeviceUnits(new Size(600, 400));
-        Icon = AppIcon.Load();
+        Icon = AppIcon.Get();
 
         _inputPanel.Height = LogicalToDeviceUnits(36);
         _sendBtn.Width = LogicalToDeviceUnits(70);
@@ -229,9 +230,8 @@ public partial class MainForm : Form
             if (dlg.ShowDialog(this) == DialogResult.OK)
             {
                 _savedConnections.Add(dlg.Result);
-                ConnectionStore.Save(_savedConnections);
-                RefreshConnList();
-                _connList.SelectedIndex = _savedConnections.Count - 1;
+                WarnIfSaveFailed(ConnectionStore.Save(_savedConnections));
+                RefreshConnList(_savedConnections.Count - 1);
             }
         };
 
@@ -247,7 +247,7 @@ public partial class MainForm : Form
             if (confirm != DialogResult.Yes) return;
 
             _savedConnections.RemoveAt(idx);
-            ConnectionStore.Save(_savedConnections);
+            WarnIfSaveFailed(ConnectionStore.Save(_savedConnections));
             RefreshConnList();
         };
     }
@@ -260,24 +260,38 @@ public partial class MainForm : Form
         if (dlg.ShowDialog(this) == DialogResult.OK)
         {
             _savedConnections[idx] = dlg.Result;
-            ConnectionStore.Save(_savedConnections);
-            RefreshConnList();
-            _connList.SelectedIndex = idx;
+            WarnIfSaveFailed(ConnectionStore.Save(_savedConnections));
+            RefreshConnList(idx);
         }
     }
 
-    private void RefreshConnList()
+    private void WarnIfSaveFailed(bool saveSucceeded)
     {
-        var selected = _connList.SelectedIndex;
+        if (saveSucceeded) return;
+        MessageBox.Show(this, "Could not save the connection library to disk.", "Save Failed",
+            MessageBoxButtons.OK, MessageBoxIcon.Warning);
+    }
+
+    // selectIndex defaults to -1 (no selection) rather than trying to preserve
+    // whatever was selected before the list was mutated: after a delete, the old
+    // index may now point at a different item, so silently reselecting it would
+    // enable Edit/Delete/Connect against a connection the user didn't click.
+    private void RefreshConnList(int selectIndex = -1)
+    {
         _connList.Items.Clear();
         foreach (var c in _savedConnections)
             _connList.Items.Add(c.Name);
-        if (selected >= 0 && selected < _connList.Items.Count)
-            _connList.SelectedIndex = selected;
+        if (selectIndex >= 0 && selectIndex < _connList.Items.Count)
+            _connList.SelectedIndex = selectIndex;
     }
 
     private async void ConnectToSelected()
     {
+        // Guard against a second connect attempt (e.g. a rapid double-click) racing
+        // this one: without it, the second call disposes the first's still-connecting
+        // IrcConnection out from under it.
+        if (_connecting) return;
+
         int idx = _connList.SelectedIndex;
         if (idx < 0) return;
         var c = _savedConnections[idx];
@@ -285,7 +299,17 @@ public partial class MainForm : Form
         _pendingAutoJoinChannels = [.. c.Channels
             .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)];
 
-        await ConnectAsync(c);
+        _connecting = true;
+        _connectSavedBtn.Enabled = false;
+        try
+        {
+            await ConnectAsync(c);
+        }
+        finally
+        {
+            _connecting = false;
+            _connectSavedBtn.Enabled = _connList.SelectedIndex >= 0;
+        }
     }
 
     private RichTextBox AddChannelTab(string name)
@@ -326,10 +350,15 @@ public partial class MainForm : Form
     private async Task ConnectAsync(SavedConnection c)
     {
         _irc?.Dispose();
-        _irc = new IrcConnection();
-        _irc.MessageReceived += OnMessage;
-        _irc.Disconnected += () =>
+        var conn = new IrcConnection();
+        _irc = conn;
+        conn.MessageReceived += OnMessage;
+        conn.Disconnected += () =>
         {
+            // Dispose() doesn't unsubscribe event handlers, and this callback is
+            // delivered via a posted continuation, so a superseded connection's
+            // Disconnected can still fire after _irc has moved on to a newer one.
+            if (_irc != conn) return;
             _statusLabel.Text = "Disconnected";
             _disconnectBtn.Enabled = false;
             AppendLine("(server)", "*** Disconnected", Color.Orange);
@@ -338,7 +367,7 @@ public partial class MainForm : Form
         try
         {
             AppendLine("(server)", $"*** Connecting to {c.Server}:{c.Port}...", Color.Cyan);
-            await _irc.ConnectAsync(c.Server, c.Port, c.Nick,
+            await conn.ConnectAsync(c.Server, c.Port, c.Nick,
                 string.IsNullOrWhiteSpace(c.Password) ? null : c.Password);
             _statusLabel.Text = $"Connected to {c.Server} as {c.Nick}";
             _disconnectBtn.Enabled = true;
@@ -363,10 +392,13 @@ public partial class MainForm : Form
         {
             case "001": // RPL_WELCOME
                 AppendLine("(server)", $"*** {msg.Params.LastOrDefault()}", Color.LightGreen);
-                if (_pendingAutoJoinChannels.Count > 0)
+                // _irc can already be null here: MessageReceived is delivered via a posted
+                // continuation (IrcConnection.ReadLoopAsync), so a Disconnect click can null
+                // out _irc between the "001" being read off the socket and this running.
+                if (_irc != null && _pendingAutoJoinChannels.Count > 0)
                 {
                     foreach (var channel in _pendingAutoJoinChannels)
-                        _ = _irc!.JoinAsync(channel.StartsWith('#') || channel.StartsWith('&') ? channel : $"#{channel}");
+                        _ = _irc.JoinAsync(channel.StartsWith('#') || channel.StartsWith('&') ? channel : $"#{channel}");
                     _pendingAutoJoinChannels.Clear();
                 }
                 break;

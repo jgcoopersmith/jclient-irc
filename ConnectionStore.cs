@@ -23,11 +23,21 @@ public static class ConnectionStore
         }
     }
 
-    public static void Save(List<SavedConnection> connections)
+    // Returns false (instead of throwing) if the file couldn't be written, e.g. the
+    // AppData folder is read-only or connections.json is locked by another process.
+    public static bool Save(List<SavedConnection> connections)
     {
-        var dir = Path.GetDirectoryName(FilePath)!;
-        Directory.CreateDirectory(dir);
-        var json = JsonSerializer.Serialize(connections, new JsonSerializerOptions { WriteIndented = true });
-        File.WriteAllText(FilePath, json);
+        try
+        {
+            var dir = Path.GetDirectoryName(FilePath)!;
+            Directory.CreateDirectory(dir);
+            var json = JsonSerializer.Serialize(connections, new JsonSerializerOptions { WriteIndented = true });
+            File.WriteAllText(FilePath, json);
+            return true;
+        }
+        catch
+        {
+            return false;
+        }
     }
 }
