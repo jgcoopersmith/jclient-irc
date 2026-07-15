@@ -16,6 +16,18 @@ public partial class MainForm : Form
     // until the user opens them.
     private readonly HashSet<string> _unreadTabs = new(StringComparer.OrdinalIgnoreCase);
 
+    // Split view: Ctrl+click marks tabs (drawn with a selection background),
+    // right-click offers stacking them; while stacked, the tab strip is hidden
+    // and the chosen logs are tiled in _splitPanel instead.
+    private readonly HashSet<string> _ctrlSelectedTabs = new(StringComparer.OrdinalIgnoreCase);
+    private readonly List<string> _splitChannels = [];
+    private readonly List<Panel> _splitPanes = [];
+    private readonly Dictionary<string, Label> _splitHeaders = new(StringComparer.OrdinalIgnoreCase);
+    private readonly TableLayoutPanel _splitPanel = new() { Dock = DockStyle.Fill, Visible = false };
+    private readonly ContextMenuStrip _splitMenu = new();
+    private bool _splitHorizontal;
+    private bool InSplitMode => _splitChannels.Count > 0;
+
     // Controls
     private readonly TableLayoutPanel _mainLayout = new() { Dock = DockStyle.Fill, RowCount = 2, ColumnCount = 1 };
     private readonly TabControl _tabs = new() { Dock = DockStyle.Fill };
@@ -65,7 +77,12 @@ public partial class MainForm : Form
 
         _mainLayout.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
         _mainLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, LogicalToDeviceUnits(36)));
-        _mainLayout.Controls.Add(_tabs, 0, 0);
+        // A TableLayoutPanel cell holds one control, so a host panel carries both
+        // the tab view and the (initially hidden) split view.
+        var viewHost = new Panel { Dock = DockStyle.Fill };
+        viewHost.Controls.Add(_splitPanel);
+        viewHost.Controls.Add(_tabs);
+        _mainLayout.Controls.Add(viewHost, 0, 0);
         _mainLayout.Controls.Add(_inputPanel, 0, 1);
 
         _inputPanel.Controls.Add(_inputBox);
@@ -149,48 +166,83 @@ public partial class MainForm : Form
             }
         };
 
-        // Owner-draw the tab headers so tabs with unread activity can be
-        // highlighted; the default renderer has no per-tab text color.
+        // Owner-draw the tab headers so tabs with unread activity and tabs
+        // Ctrl+selected for stacking can be highlighted; the default renderer
+        // has no per-tab colors.
         _tabs.DrawMode = TabDrawMode.OwnerDrawFixed;
         _tabs.DrawItem += (s, e) =>
         {
             if (e.Index < 0 || e.Index >= _tabs.TabCount) return;
             var tab = _tabs.TabPages[e.Index];
-            e.DrawBackground();
+            if (_ctrlSelectedTabs.Contains(tab.Text))
+            {
+                using var sel = new SolidBrush(Color.FromArgb(176, 205, 235));
+                e.Graphics.FillRectangle(sel, e.Bounds);
+            }
+            else
+            {
+                e.DrawBackground();
+            }
             var color = _unreadTabs.Contains(tab.Text) ? Color.DarkOrange : _tabs.ForeColor;
             TextRenderer.DrawText(e.Graphics, tab.Text, _tabs.Font, e.Bounds, color,
                 TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter);
         };
 
-        // Middle-click closes a tab
+        // Middle-click closes a tab; Ctrl+left-click marks tabs for stacking
         _tabs.MouseDown += (s, e) =>
         {
             if (e.Button == MouseButtons.Middle)
+            {
                 CloseTabAt(e.Location);
+            }
+            else if (e.Button == MouseButtons.Left && ModifierKeys.HasFlag(Keys.Control))
+            {
+                var tab = TabPageAt(e.Location);
+                if (tab != null)
+                {
+                    if (!_ctrlSelectedTabs.Remove(tab.Text))
+                        _ctrlSelectedTabs.Add(tab.Text);
+                    _tabs.Invalidate();
+                }
+            }
         };
 
-        // Right-click shows context menu on the specific tab that was clicked
+        // Right-click on a tab: stack options plus Close for the clicked tab
         TabPage? _rightClickedTab = null;
         var tabMenu = new ContextMenuStrip();
+        var stackHItem = new ToolStripMenuItem("Stack Horizontal");
+        stackHItem.Click += (s, e) => EnterSplit(horizontal: true);
+        var stackVItem = new ToolStripMenuItem("Stack Vertical");
+        stackVItem.Click += (s, e) => EnterSplit(horizontal: false);
         var closeItem = new ToolStripMenuItem("Close");
         closeItem.Click += async (s, e) =>
         {
             if (_rightClickedTab != null)
                 await CloseTab(_rightClickedTab.Text);
         };
+        tabMenu.Items.Add(stackHItem);
+        tabMenu.Items.Add(stackVItem);
+        tabMenu.Items.Add(new ToolStripSeparator());
         tabMenu.Items.Add(closeItem);
         _tabs.MouseDown += (s, e) =>
         {
             if (e.Button == MouseButtons.Right)
             {
                 var tab = TabPageAt(e.Location);
-                if (tab != null && tab.Text != "(server)")
+                if (tab != null)
                 {
                     _rightClickedTab = tab;
+                    closeItem.Enabled = tab.Text != "(server)";
                     tabMenu.Show(_tabs, e.Location);
                 }
             }
         };
+
+        // Right-click menu while stacked: re-orient or go back to tabs
+        _splitMenu.Items.Add("Stack Horizontal", null, (s, e) => BuildSplit([.. _splitChannels], horizontal: true));
+        _splitMenu.Items.Add("Stack Vertical", null, (s, e) => BuildSplit([.. _splitChannels], horizontal: false));
+        _splitMenu.Items.Add(new ToolStripSeparator());
+        _splitMenu.Items.Add("Unstack", null, (s, e) => ExitSplit());
 
         // Ctrl+A selects all text in the input box
         _inputBox.KeyDown += (s, e) =>
@@ -243,6 +295,7 @@ public partial class MainForm : Form
 
         _channels.Remove(name);
         _unreadTabs.Remove(name);
+        _ctrlSelectedTabs.Remove(name);
         _tabs.TabPages.Remove(ch.tab);
 
         if (_currentTarget.Equals(name, StringComparison.OrdinalIgnoreCase))
@@ -251,6 +304,135 @@ public partial class MainForm : Form
             if (_channels.TryGetValue("(server)", out var srv))
                 _tabs.SelectedTab = srv.tab;
         }
+
+        HandleTabRemovedFromSplit(name);
+    }
+
+    // Stack the Ctrl+selected tabs, or every tab if fewer than two are selected
+    private void EnterSplit(bool horizontal)
+    {
+        var all = _tabs.TabPages.Cast<TabPage>().Select(t => t.Text);
+        var targets = _ctrlSelectedTabs.Count >= 2
+            ? all.Where(_ctrlSelectedTabs.Contains).ToList()
+            : all.ToList();
+        _ctrlSelectedTabs.Clear();
+        BuildSplit(targets, horizontal);
+    }
+
+    private void BuildSplit(List<string> channels, bool horizontal)
+    {
+        TearDownSplitPanes();
+        _splitChannels.Clear();
+        _splitChannels.AddRange(channels.Where(_channels.ContainsKey));
+        if (_splitChannels.Count == 0)
+        {
+            ExitSplit();
+            return;
+        }
+        _splitHorizontal = horizontal;
+
+        int n = _splitChannels.Count;
+        _splitPanel.SuspendLayout();
+        _splitPanel.ColumnStyles.Clear();
+        _splitPanel.RowStyles.Clear();
+        _splitPanel.ColumnCount = horizontal ? n : 1;
+        _splitPanel.RowCount = horizontal ? 1 : n;
+        for (int i = 0; i < n; i++)
+        {
+            if (horizontal) _splitPanel.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100f / n));
+            else _splitPanel.RowStyles.Add(new RowStyle(SizeType.Percent, 100f / n));
+        }
+
+        for (int i = 0; i < n; i++)
+        {
+            var name = _splitChannels[i];
+            var log = _channels[name].log;
+            var header = new Label
+            {
+                Text = name,
+                Dock = DockStyle.Top,
+                Height = LogicalToDeviceUnits(20),
+                TextAlign = ContentAlignment.MiddleLeft,
+                BackColor = Color.FromArgb(45, 45, 60),
+                ForeColor = Color.LightGray,
+                Padding = new Padding(LogicalToDeviceUnits(4), 0, 0, 0),
+                ContextMenuStrip = _splitMenu
+            };
+            var pane = new Panel { Dock = DockStyle.Fill, Margin = new Padding(LogicalToDeviceUnits(1)), ContextMenuStrip = _splitMenu };
+            log.Parent?.Controls.Remove(log);
+            log.ContextMenuStrip = _splitMenu;
+            pane.Controls.Add(log);
+            pane.Controls.Add(header);
+            _splitPanes.Add(pane);
+            _splitHeaders[name] = header;
+            _splitPanel.Controls.Add(pane, horizontal ? i : 0, horizontal ? 0 : i);
+        }
+        _splitPanel.ResumeLayout();
+
+        _tabs.Visible = false;
+        _splitPanel.Visible = true;
+        if (!_splitChannels.Contains(_currentTarget, StringComparer.OrdinalIgnoreCase))
+            _currentTarget = _splitChannels[0];
+        UpdateSplitHeaderColors();
+    }
+
+    // Returns every stacked log to its own TabPage and disposes the panes
+    private void TearDownSplitPanes()
+    {
+        foreach (var name in _splitChannels)
+        {
+            if (!_channels.TryGetValue(name, out var ch)) continue;
+            ch.log.Parent?.Controls.Remove(ch.log);
+            ch.log.ContextMenuStrip = null;
+            ch.tab.Controls.Add(ch.log);
+        }
+        _splitPanel.Controls.Clear();
+        foreach (var pane in _splitPanes)
+            pane.Dispose();
+        _splitPanes.Clear();
+        _splitHeaders.Clear();
+    }
+
+    private void ExitSplit()
+    {
+        TearDownSplitPanes();
+        // Everything in the split was visible, so nothing in it is unread
+        foreach (var name in _splitChannels)
+            _unreadTabs.Remove(name);
+        _splitChannels.Clear();
+        _splitPanel.Visible = false;
+        _tabs.Visible = true;
+        _currentTarget = _tabs.SelectedTab?.Text ?? "(server)";
+        _tabs.Invalidate();
+    }
+
+    // Mark the pane whose messages the input box sends to
+    private void SetSplitCurrentTarget(string name)
+    {
+        _currentTarget = name;
+        UpdateSplitHeaderColors();
+    }
+
+    private void UpdateSplitHeaderColors()
+    {
+        foreach (var (name, header) in _splitHeaders)
+        {
+            bool active = name.Equals(_currentTarget, StringComparison.OrdinalIgnoreCase);
+            header.BackColor = active ? Color.FromArgb(60, 90, 150) : Color.FromArgb(45, 45, 60);
+            header.ForeColor = active ? Color.White : Color.LightGray;
+        }
+    }
+
+    // Rebuilds (or exits) the split when one of its channels closes
+    private void HandleTabRemovedFromSplit(string name)
+    {
+        int idx = _splitChannels.FindIndex(c => c.Equals(name, StringComparison.OrdinalIgnoreCase));
+        if (idx < 0) return;
+        _splitChannels.RemoveAt(idx);
+        if (_splitChannels.Count == 0)
+            ExitSplit();
+        else
+            BuildSplit([.. _splitChannels], _splitHorizontal);
     }
 
     private void BuildLibraryPanel()
@@ -407,6 +589,12 @@ public partial class MainForm : Form
             ScrollBars = RichTextBoxScrollBars.Vertical,
             WordWrap = true
         };
+        // While stacked, clicking into a pane's log makes it the message target
+        log.MouseDown += (s, e) =>
+        {
+            if (InSplitMode && _splitChannels.Contains(name, StringComparer.OrdinalIgnoreCase))
+                SetSplitCurrentTarget(name);
+        };
         var tab = new TabPage(name);
         tab.Controls.Add(log);
         _tabs.TabPages.Add(tab);
@@ -429,8 +617,11 @@ public partial class MainForm : Form
         log.AppendText(text + "\n");
         log.ScrollToCaret();
 
-        // Highlight the tab if this message landed somewhere the user isn't looking
-        if (!target.Equals(_currentTarget, StringComparison.OrdinalIgnoreCase) && _unreadTabs.Add(target))
+        // Highlight the tab if this message landed somewhere the user isn't
+        // looking; every stacked pane is visible, so those never count as unread.
+        if (!target.Equals(_currentTarget, StringComparison.OrdinalIgnoreCase)
+            && !_splitChannels.Contains(target, StringComparer.OrdinalIgnoreCase)
+            && _unreadTabs.Add(target))
             _tabs.Invalidate();
     }
 
@@ -558,6 +749,7 @@ public partial class MainForm : Form
                 {
                     _channels.Remove(channel);
                     _unreadTabs.Remove(channel);
+                    _ctrlSelectedTabs.Remove(channel);
                     _tabs.TabPages.Remove(ch.tab);
                     if (_currentTarget.Equals(channel, StringComparison.OrdinalIgnoreCase))
                     {
@@ -565,6 +757,7 @@ public partial class MainForm : Form
                         if (_channels.TryGetValue("(server)", out var srv))
                             _tabs.SelectedTab = srv.tab;
                     }
+                    HandleTabRemovedFromSplit(channel);
                 }
                 break;
             }
