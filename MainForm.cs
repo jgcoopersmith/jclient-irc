@@ -17,6 +17,12 @@ public partial class MainForm : Form
     private readonly Dictionary<string, string> _topics = new(StringComparer.OrdinalIgnoreCase);
     private string? _activeServer;
 
+    // Input command history, browsed with Up/Down. _historyIndex ==
+    // _inputHistory.Count means "past the newest entry" (the live draft).
+    private readonly List<string> _inputHistory = [];
+    private int _historyIndex;
+    private string _historyDraft = "";
+
     // Tabs that received messages while not the active tab; drawn highlighted
     // until the user opens them.
     private readonly HashSet<string> _unreadTabs = new(StringComparer.OrdinalIgnoreCase);
@@ -256,6 +262,30 @@ public partial class MainForm : Form
             {
                 _inputBox.SelectAll();
                 e.SuppressKeyPress = true;
+            }
+        };
+
+        // Up/Down browse the command history; the in-progress draft is stashed
+        // on the way up and restored when arrowing back past the newest entry.
+        _inputBox.KeyDown += (s, e) =>
+        {
+            if (e.KeyCode == Keys.Up)
+            {
+                e.SuppressKeyPress = true;
+                if (_inputHistory.Count == 0 || _historyIndex == 0) return;
+                if (_historyIndex == _inputHistory.Count)
+                    _historyDraft = _inputBox.Text;
+                _historyIndex--;
+                _inputBox.Text = _inputHistory[_historyIndex];
+                _inputBox.SelectionStart = _inputBox.TextLength;
+            }
+            else if (e.KeyCode == Keys.Down)
+            {
+                e.SuppressKeyPress = true;
+                if (_historyIndex >= _inputHistory.Count) return;
+                _historyIndex++;
+                _inputBox.Text = _historyIndex == _inputHistory.Count ? _historyDraft : _inputHistory[_historyIndex];
+                _inputBox.SelectionStart = _inputBox.TextLength;
             }
         };
 
@@ -915,7 +945,16 @@ public partial class MainForm : Form
     {
         var text = _inputBox.Text.Trim();
         _inputBox.Clear();
-        if (string.IsNullOrEmpty(text) || _irc == null) return;
+        if (string.IsNullOrEmpty(text)) return;
+
+        // Record in command history (skip consecutive duplicates) and reset
+        // the Up/Down browse position to "past the newest entry".
+        if (_inputHistory.Count == 0 || _inputHistory[^1] != text)
+            _inputHistory.Add(text);
+        _historyIndex = _inputHistory.Count;
+        _historyDraft = "";
+
+        if (_irc == null) return;
 
         if (text.StartsWith('/'))
         {
