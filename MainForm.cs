@@ -130,6 +130,39 @@ public partial class MainForm : Form
         connectOptions.DropDownItems.Add(connectOnStartupItem);
         connectOptions.DropDownItems.Add(reconnectOnDisconnectItem);
         optionsItem.DropDownItems.Add(connectOptions);
+        var logOptions = new ToolStripMenuItem("Log");
+        string LogDirDisplay() => string.IsNullOrEmpty(_settings.LogDirectory)
+            ? "Logging: off"
+            : $"Logging to: {_settings.LogDirectory}";
+        var currentLogDirItem = new ToolStripMenuItem(LogDirDisplay()) { Enabled = false };
+        var setLogDirItem = new ToolStripMenuItem("Set Log Directory...");
+        setLogDirItem.Click += (s, e) =>
+        {
+            using var dlg = new FolderBrowserDialog
+            {
+                Description = "Choose the catch-all folder where all chat and server logs are written",
+                UseDescriptionForTitle = true,
+                InitialDirectory = _settings.LogDirectory
+            };
+            if (dlg.ShowDialog(this) == DialogResult.OK)
+            {
+                _settings.LogDirectory = dlg.SelectedPath;
+                SettingsStore.Save(_settings);
+                currentLogDirItem.Text = LogDirDisplay();
+            }
+        };
+        var disableLogItem = new ToolStripMenuItem("Disable Logging");
+        disableLogItem.Click += (s, e) =>
+        {
+            _settings.LogDirectory = "";
+            SettingsStore.Save(_settings);
+            currentLogDirItem.Text = LogDirDisplay();
+        };
+        logOptions.DropDownItems.Add(setLogDirItem);
+        logOptions.DropDownItems.Add(disableLogItem);
+        logOptions.DropDownItems.Add(new ToolStripSeparator());
+        logOptions.DropDownItems.Add(currentLogDirItem);
+        optionsItem.DropDownItems.Add(logOptions);
         var aboutOptions = new ToolStripMenuItem("About");
         // Version comes from <Version> in the csproj; strip any "+commit" suffix
         // the SDK appends to the informational version.
@@ -695,6 +728,25 @@ public partial class MainForm : Form
             && !_splitChannels.Contains(target, StringComparer.OrdinalIgnoreCase)
             && _unreadTabs.Add(target))
             _tabs.Invalidate();
+
+        WriteToLogFile(target, text);
+    }
+
+    // Appends the line to <LogDirectory>\<window>.log when a log directory is
+    // configured (File > Options > Log). Failures are swallowed: logging must
+    // never take the client down mid-conversation.
+    private void WriteToLogFile(string target, string text)
+    {
+        var dir = _settings.LogDirectory;
+        if (string.IsNullOrEmpty(dir)) return;
+        try
+        {
+            Directory.CreateDirectory(dir);
+            var safeName = string.Join("_", target.Split(Path.GetInvalidFileNameChars()));
+            File.AppendAllText(Path.Combine(dir, safeName + ".log"),
+                $"[{DateTime.Now:yyyy-MM-dd HH:mm:ss}] {text}{Environment.NewLine}");
+        }
+        catch { }
     }
 
     private async Task ConnectAsync(SavedConnection c)
