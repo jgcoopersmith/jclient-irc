@@ -7,6 +7,8 @@ public partial class MainForm : Form
 {
     private IrcConnection? _irc;
     private bool _connecting;
+    private bool _explicitQuit; // user issued /quit; window close must not send another QUIT
+    private bool _closing;      // form is shutting down; ignore late connection events
 
     // Channel tabs: channel name -> (TabPage, header label, RichTextBox)
     private readonly Dictionary<string, (TabPage tab, Label header, RichTextBox log)> _channels = new(StringComparer.OrdinalIgnoreCase);
@@ -16,6 +18,11 @@ public partial class MainForm : Form
     // connected to, both shown in every window's header line.
     private readonly Dictionary<string, string> _topics = new(StringComparer.OrdinalIgnoreCase);
     private string? _activeServer;
+
+    // Who is in each channel (from NAMES on join, then joins/parts/kicks), so
+    // quit and nick-change messages appear only in the channels that person
+    // was actually in.
+    private readonly Dictionary<string, HashSet<string>> _channelUsers = new(StringComparer.OrdinalIgnoreCase);
 
     // Input command history, browsed with Up/Down. _historyIndex ==
     // _inputHistory.Count means "past the newest entry" (the live draft).
@@ -365,6 +372,7 @@ public partial class MainForm : Form
         _unreadTabs.Remove(name);
         _ctrlSelectedTabs.Remove(name);
         _topics.Remove(name);
+        _channelUsers.Remove(name);
         _tabs.TabPages.Remove(ch.tab);
 
         if (_currentTarget.Equals(name, StringComparison.OrdinalIgnoreCase))
@@ -751,6 +759,7 @@ public partial class MainForm : Form
 
     private async Task ConnectAsync(SavedConnection c)
     {
+        _explicitQuit = false; // a fresh connection deserves a clean quit again
         _irc?.Dispose();
         var conn = new IrcConnection();
         _irc = conn;
@@ -762,7 +771,9 @@ public partial class MainForm : Form
             // Disconnected can still fire after _irc has moved on to a newer one.
             // This guard also means user-initiated disconnects (OnDisconnect nulls
             // _irc first) never reach the auto-reconnect below — only real drops do.
-            if (_irc != conn) return;
+            // _closing: the QUIT sent while the window closes must not trigger a
+            // status update or auto-reconnect against a disposing form.
+            if (_closing || _irc != conn) return;
             _statusLabel.Text = "Disconnected";
             _disconnectBtn.Enabled = false;
             _activeServer = null;
@@ -797,9 +808,10 @@ public partial class MainForm : Form
         AppendLine("(server)", "*** Reconnecting in 5 seconds...", Color.Cyan);
         await Task.Delay(5000);
 
-        // Skip if the user connected somewhere else or clicked Disconnect while
-        // we were waiting — _irc no longer points at the connection that died.
-        if (_irc != failedConn) return;
+        // Skip if the app is shutting down, or the user connected somewhere else
+        // or clicked Disconnect while we were waiting — _irc no longer points at
+        // the connection that died.
+        if (_closing || _irc != failedConn) return;
 
         await ConnectAsync(c);
     }
@@ -807,7 +819,7 @@ public partial class MainForm : Form
     private async void OnDisconnect(object? s, EventArgs e)
     {
         if (_irc == null) return;
-        try { await _irc.QuitAsync("Leaving"); }
+        try { await _irc.QuitAsync("jclient"); }
         catch { } // connection may already be dead; QUIT is best-effort
         _irc?.Dispose();
         _irc = null;
@@ -820,6 +832,14 @@ public partial class MainForm : Form
         UpdateAllHeaders();
         AppendLine("(server)", "*** Disconnected", Color.Orange);
     }
+
+    private HashSet<string> UsersOf(string channel) =>
+        _channelUsers.TryGetValue(channel, out var set)
+            ? set
+            : _channelUsers[channel] = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+    // NAMES entries carry status prefixes (@op, +voice, %halfop, ...)
+    private static string StripNickPrefix(string nick) => nick.TrimStart('@', '+', '%', '&', '~');
 
     private void OnMessage(IrcMessage msg)
     {
@@ -862,6 +882,11 @@ public partial class MainForm : Form
                 var nick = msg.PrefixNick ?? "";
                 if (!_channels.ContainsKey(channel))
                     AddChannelTab(channel);
+                // Our own join starts a fresh membership list (NAMES follows);
+                // anyone else's join adds them to it.
+                if (nick.Equals(_irc?.CurrentNick, StringComparison.OrdinalIgnoreCase))
+                    UsersOf(channel).Clear();
+                UsersOf(channel).Add(nick);
                 // Deliberately no _tabs.SelectedTab change here: tabs only switch
                 // when the user clicks one. The unread highlight marks the new tab.
                 AppendLine(channel, $"*** {nick} joined {channel}", Color.LightBlue);
@@ -874,6 +899,7 @@ public partial class MainForm : Form
                 var nick = msg.PrefixNick ?? "";
                 var reason = msg.Params.Length > 1 ? msg.Params[1] : "";
                 AppendLine(channel, $"*** {nick} left {channel} ({reason})", Color.LightSalmon);
+                UsersOf(channel).Remove(nick);
                 // If it's us parting and the tab is still open (e.g. via /part command), close it
                 if (nick.Equals(_irc?.CurrentNick, StringComparison.OrdinalIgnoreCase)
                     && _channels.TryGetValue(channel, out var ch))
@@ -882,6 +908,7 @@ public partial class MainForm : Form
                     _unreadTabs.Remove(channel);
                     _ctrlSelectedTabs.Remove(channel);
                     _topics.Remove(channel);
+                    _channelUsers.Remove(channel);
                     _tabs.TabPages.Remove(ch.tab);
                     if (_currentTarget.Equals(channel, StringComparison.OrdinalIgnoreCase))
                     {
@@ -898,8 +925,10 @@ public partial class MainForm : Form
             {
                 var nick = msg.PrefixNick ?? "";
                 var reason = msg.Params.LastOrDefault() ?? "";
-                foreach (var kv in _channels)
-                    AppendLine(kv.Key, $"*** {nick} quit ({reason})", Color.DimGray);
+                // Only the channels the quitter was actually in see the message
+                foreach (var (channel, users) in _channelUsers)
+                    if (users.Remove(nick) && _channels.ContainsKey(channel))
+                        AppendLine(channel, $"*** {nick} quit ({reason})", Color.DimGray);
                 break;
             }
 
@@ -907,8 +936,13 @@ public partial class MainForm : Form
             {
                 var oldNick = msg.PrefixNick ?? "";
                 var newNick = msg.Params[0];
-                foreach (var kv in _channels)
-                    AppendLine(kv.Key, $"*** {oldNick} is now {newNick}", Color.Plum);
+                foreach (var (channel, users) in _channelUsers)
+                {
+                    if (!users.Remove(oldNick)) continue;
+                    users.Add(newNick);
+                    if (_channels.ContainsKey(channel))
+                        AppendLine(channel, $"*** {oldNick} is now {newNick}", Color.Plum);
+                }
                 UpdateAllHeaders(); // IrcConnection tracks our own nick changes
                 break;
             }
@@ -917,6 +951,9 @@ public partial class MainForm : Form
             {
                 var channel = msg.Params.Length > 2 ? msg.Params[2] : "";
                 var names = msg.Params.LastOrDefault() ?? "";
+                if (channel.Length > 0)
+                    foreach (var n in names.Split(' ', StringSplitOptions.RemoveEmptyEntries))
+                        UsersOf(channel).Add(StripNickPrefix(n));
                 AppendLine(channel, $"*** Users: {names}", Color.DimGray);
                 break;
             }
@@ -967,6 +1004,7 @@ public partial class MainForm : Form
                 var kicked = msg.Params[1];
                 var reason = msg.Params.Length > 2 ? msg.Params[2] : "";
                 AppendLine(channel, $"*** {msg.PrefixNick} kicked {kicked} ({reason})", Color.OrangeRed);
+                UsersOf(channel).Remove(kicked);
                 break;
             }
 
@@ -1053,7 +1091,10 @@ public partial class MainForm : Form
                 await _irc.SendRawAsync($"NICK {rest}");
                 break;
             case "QUIT":
-                await _irc.QuitAsync(rest.Length > 0 ? rest : "Goodbye");
+                // An explicit /quit message wins over the default; either way,
+                // the window-close path must not send a second QUIT afterwards.
+                _explicitQuit = true;
+                await _irc.QuitAsync(rest.Length > 0 ? rest : "jclient");
                 break;
             case "TOPIC":
             {
@@ -1088,6 +1129,20 @@ public partial class MainForm : Form
                 ?? _savedConnections[0];
         _connList.SelectedIndex = _savedConnections.IndexOf(c);
         ConnectToSelected();
+    }
+
+    protected override void OnFormClosing(FormClosingEventArgs e)
+    {
+        _closing = true;
+        // Closing the window by any means sends a proper "QUIT :jclient" so the
+        // server sees a clean quit rather than a dropped socket — unless the user
+        // already issued an explicit /quit, whose message must stand.
+        if (!_explicitQuit && _irc is { IsConnected: true })
+        {
+            try { _irc.QuitAsync("jclient").Wait(500); }
+            catch { }
+        }
+        base.OnFormClosing(e);
     }
 
     protected override void OnFormClosed(FormClosedEventArgs e)
