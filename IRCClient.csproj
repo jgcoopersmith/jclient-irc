@@ -8,4 +8,14 @@
     <ImplicitUsings>enable</ImplicitUsings>
   </PropertyGroup>
 
+  <!-- `dotnet publish -c Release -r win-x64` produces one portable .exe with the .NET
+       runtime bundled in, so it runs on any Windows machine without .NET installed.
+       Regular `dotnet build` and `dotnet run` are unaffected. -->
+  <PropertyGroup>
+    <RuntimeIdentifiers>win-x64</RuntimeIdentifiers>
+    <PublishSingleFile>true</PublishSingleFile>
+    <IncludeNativeLibrariesForSelfExtract>true</IncludeNativeLibrariesForSelfExtract>
+    <SelfContained>true</SelfContained>
+  </PropertyGroup>
+
 </Project>
