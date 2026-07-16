@@ -55,18 +55,20 @@ public partial class MainForm : Form
     private string? _dragSourceChannel;
     private string? _dropTargetChannel;
 
-    // Default QUIT message: "jclient <version>", version as shown in About
-    // (Application.ProductVersion minus the SDK's "+commithash" suffix)
-    private static string QuitMessage
+    // Version as shown in About: Application.ProductVersion minus the SDK's
+    // "+commithash" suffix. Used for the quit message and CTCP VERSION replies.
+    private static string VersionString
     {
         get
         {
             var v = Application.ProductVersion;
             int plus = v.IndexOf('+');
-            if (plus >= 0) v = v[..plus];
-            return $"jclient {v}";
+            return plus >= 0 ? v[..plus] : v;
         }
     }
+
+    // Default QUIT message: "jclient <version>"
+    private static string QuitMessage => $"jclient {VersionString}";
 
     // Controls
     private readonly TableLayoutPanel _mainLayout = new() { Dock = DockStyle.Fill, RowCount = 2, ColumnCount = 1 };
@@ -1016,8 +1018,36 @@ public partial class MainForm : Form
                 var target = msg.Params[0];
                 var text = msg.Params.Length > 1 ? msg.Params[1] : "";
                 var nick = msg.PrefixNick ?? msg.Prefix ?? "?";
-                // PM to us — show in their nick tab
                 var displayTarget = target.StartsWith('#') || target.StartsWith('&') ? target : nick;
+
+                // CTCP: text wrapped in \x01. Handle the common queries out of band.
+                if (text.Length >= 2 && text[0] == '\x01' && text[^1] == '\x01')
+                {
+                    var ctcp = text.Trim('\x01');
+                    var verb = ctcp.Split(' ', 2)[0].ToUpperInvariant();
+                    if (verb == "ACTION")
+                    {
+                        var action = ctcp.Length > 7 ? ctcp[7..] : "";
+                        AppendLine(displayTarget, $"* {DisplayNick(displayTarget, nick)} {action}", Color.Plum);
+                    }
+                    else if (verb == "VERSION")
+                    {
+                        _ = _irc?.SendRawAsync($"NOTICE {nick} :\x01VERSION jclient irc by j0ker {VersionString}\x01");
+                        AppendLine("(server)", $"*** CTCP VERSION request from {nick}", Color.DimGray);
+                    }
+                    else if (verb == "PING")
+                    {
+                        _ = _irc?.SendRawAsync($"NOTICE {nick} :\x01{ctcp}\x01");
+                        AppendLine("(server)", $"*** CTCP PING request from {nick}", Color.DimGray);
+                    }
+                    else
+                    {
+                        AppendLine("(server)", $"*** CTCP {verb} request from {nick}", Color.DimGray);
+                    }
+                    break;
+                }
+
+                // PM to us — show in their nick tab
                 AppendLine(displayTarget, $"<{DisplayNick(displayTarget, nick)}> {text}", Color.White);
                 break;
             }
