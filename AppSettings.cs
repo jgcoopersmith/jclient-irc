@@ -25,6 +25,9 @@ public class AppSettings
     // built-in "jclient irc by j0ker <version>" response.
     public string CustomVersionReply { get; set; } = "";
 
+    // mIRC-style aliases, one per line: "/name commands" (see Tools > Alias).
+    public string Aliases { get; set; } = "";
+
     // View menu
     public bool KeepOnTop { get; set; }
 

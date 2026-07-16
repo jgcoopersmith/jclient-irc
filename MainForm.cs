@@ -67,6 +67,86 @@ public partial class MainForm : Form
     // The bold "Connections" label; kept so font re-application preserves bold
     private Label? _libraryHeader;
 
+    // Parsed aliases: lowercased name -> command template (mIRC-style).
+    private Dictionary<string, string> _aliases = new(StringComparer.OrdinalIgnoreCase);
+
+    // Rebuild the alias table from the raw multi-line setting text
+    private void ParseAliases()
+    {
+        _aliases = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var raw in _settings.Aliases.Split('\n'))
+        {
+            var line = raw.Trim();
+            if (line.Length == 0 || !line.StartsWith('/')) continue;
+            var sp = line.IndexOf(' ');
+            if (sp < 0) continue;
+            var name = line[1..sp].Trim();
+            var body = line[(sp + 1)..].Trim();
+            if (name.Length > 0 && body.Length > 0)
+                _aliases[name] = body;
+        }
+    }
+
+    // Expand a mIRC-style alias template against the given argument list.
+    // Supports $N, $N-, $N-M, $$N (required), $+ (concatenation), $? (prompt).
+    // Returns null if a required parameter ($$N) is missing.
+    private string? ExpandAlias(string template, string[] args)
+    {
+        var sb = new System.Text.StringBuilder();
+        int i = 0;
+        while (i < template.Length)
+        {
+            char c = template[i];
+            if (c != '$') { sb.Append(c); i++; continue; }
+
+            // $+ : concatenation marker — drop it and the surrounding spaces
+            if (i + 1 < template.Length && template[i + 1] == '+')
+            {
+                while (sb.Length > 0 && sb[^1] == ' ') sb.Length--;
+                i += 2;
+                while (i < template.Length && template[i] == ' ') i++;
+                continue;
+            }
+
+            // $? : prompt the user for a value
+            if (i + 1 < template.Length && template[i + 1] == '?')
+            {
+                var val = "";
+                if (!PromptText("Alias input", "Enter value:", ref val)) return null;
+                sb.Append(val);
+                i += 2;
+                continue;
+            }
+
+            bool required = i + 1 < template.Length && template[i + 1] == '$';
+            int j = i + (required ? 2 : 1);
+            int numStart = j;
+            while (j < template.Length && char.IsDigit(template[j])) j++;
+            if (j == numStart) { sb.Append('$'); i++; continue; } // lone $, keep literal
+
+            int from = int.Parse(template[numStart..j]);
+            int? to = from;            // default single param
+            if (j < template.Length && template[j] == '-')
+            {
+                j++;
+                int rangeStart = j;
+                while (j < template.Length && char.IsDigit(template[j])) j++;
+                to = j > rangeStart ? int.Parse(template[rangeStart..j]) : null; // "$N-" => open-ended
+            }
+
+            if (required && from > args.Length) return null; // $$N missing
+
+            if (from >= 1 && from <= args.Length)
+            {
+                int end = to.HasValue ? Math.Min(to.Value, args.Length) : args.Length;
+                if (end >= from)
+                    sb.Append(string.Join(' ', args[(from - 1)..end]));
+            }
+            i = j;
+        }
+        return sb.ToString();
+    }
+
     // Closes every window except (server) and clears all per-channel state
     private void CloseAllChannelWindows()
     {
@@ -332,6 +412,20 @@ public partial class MainForm : Form
         viewMenu.DropDownItems.Add(fontMenu);
         _menu.Items.Add(viewMenu);
 
+        // Tools menu
+        var toolsMenu = new ToolStripMenuItem("Tools");
+        var aliasItem = new ToolStripMenuItem("Alias...");
+        aliasItem.Click += (s, e) =>
+        {
+            using var dlg = new AliasEditForm(_settings.Aliases);
+            if (dlg.ShowDialog(this) != DialogResult.OK) return;
+            _settings.Aliases = dlg.Aliases;
+            SettingsStore.Save(_settings);
+            ParseAliases();
+        };
+        toolsMenu.DropDownItems.Add(aliasItem);
+        _menu.Items.Add(toolsMenu);
+
         MainMenuStrip = _menu;
 
         // Add order matters for docking: controls are docked in reverse of Controls.Add
@@ -517,6 +611,7 @@ public partial class MainForm : Form
         // Apply persisted View settings
         TopMost = _settings.KeepOnTop;
         if (_settings.DefaultFontEnabled || _settings.ChannelFontEnabled) ApplyFonts();
+        ParseAliases();
     }
 
     private TabPage? TabPageAt(Point p)
@@ -1545,12 +1640,38 @@ public partial class MainForm : Form
         }
     }
 
-    private async Task HandleCommand(string cmd)
+    private async Task HandleCommand(string cmd, int depth = 0)
     {
         if (_irc == null) return;
         var parts = cmd.Split(' ', 2);
         var verb = parts[0].ToUpperInvariant();
         var rest = parts.Length > 1 ? parts[1] : "";
+
+        // User-defined aliases take precedence over built-ins. Guard against
+        // runaway recursion (an alias that expands to itself).
+        if (depth < 10 && _aliases.TryGetValue(parts[0], out var template))
+        {
+            var args = rest.Length > 0 ? rest.Split(' ', StringSplitOptions.RemoveEmptyEntries) : [];
+            var expanded = ExpandAlias(template, args);
+            if (expanded == null)
+            {
+                AppendLine(_currentTarget, $"*** Alias /{parts[0]}: missing required parameter", Color.OrangeRed);
+                return;
+            }
+            // Each |-separated piece is run as its own command
+            foreach (var piece in expanded.Split('|'))
+            {
+                var line = piece.Trim();
+                if (line.Length == 0) continue;
+                if (line.StartsWith('/')) await HandleCommand(line[1..], depth + 1);
+                else if (_currentTarget is not "(server)" and not "")
+                {
+                    await _irc.PrivMsgAsync(_currentTarget, line);
+                    AppendLine(_currentTarget, $"<{DisplayNick(_currentTarget, _irc.CurrentNick ?? "")}> {line}", Color.LightYellow);
+                }
+            }
+            return;
+        }
 
         switch (verb)
         {
