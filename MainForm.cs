@@ -51,6 +51,10 @@ public partial class MainForm : Form
     private bool _splitHorizontal;
     private bool InSplitMode => _splitChannels.Count > 0;
 
+    // Drag-to-swap state: pane header being dragged and the pane under the cursor
+    private string? _dragSourceChannel;
+    private string? _dropTargetChannel;
+
     // Controls
     private readonly TableLayoutPanel _mainLayout = new() { Dock = DockStyle.Fill, RowCount = 2, ColumnCount = 1 };
     private readonly TabControl _tabs = new() { Dock = DockStyle.Fill };
@@ -478,6 +482,40 @@ public partial class MainForm : Form
             _splitPanes.Add(pane);
             _splitHeaders[name] = header;
             _splitPanel.Controls.Add(pane, horizontal ? i : 0, horizontal ? 0 : i);
+
+            // Drag a pane by its header onto another pane to swap positions
+            var dragName = name;
+            header.MouseDown += (s, e) =>
+            {
+                if (e.Button != MouseButtons.Left) return;
+                _dragSourceChannel = dragName;
+                header.Cursor = Cursors.SizeAll;
+            };
+            header.MouseMove += (s, e) =>
+            {
+                if (_dragSourceChannel == null) return;
+                var over = PaneChannelAt(MousePosition);
+                var target = over != null && !over.Equals(_dragSourceChannel, StringComparison.OrdinalIgnoreCase) ? over : null;
+                if (!string.Equals(target, _dropTargetChannel, StringComparison.OrdinalIgnoreCase))
+                {
+                    _dropTargetChannel = target;
+                    UpdateSplitHeaderColors();
+                }
+            };
+            header.MouseUp += (s, e) =>
+            {
+                if (e.Button != MouseButtons.Left || _dragSourceChannel == null) return;
+                var src = _dragSourceChannel;
+                var dst = PaneChannelAt(MousePosition);
+                _dragSourceChannel = null;
+                _dropTargetChannel = null;
+                header.Cursor = Cursors.Default;
+                UpdateSplitHeaderColors();
+                // Defer the swap: rebuilding disposes this header while its own
+                // MouseUp handler is still on the stack.
+                if (dst != null && !dst.Equals(src, StringComparison.OrdinalIgnoreCase))
+                    BeginInvoke(() => SwapSplitPanes(src, dst));
+            };
         }
         _splitPanel.ResumeLayout();
 
@@ -529,10 +567,34 @@ public partial class MainForm : Form
     {
         foreach (var (name, header) in _splitHeaders)
         {
+            bool dropTarget = name.Equals(_dropTargetChannel, StringComparison.OrdinalIgnoreCase);
             bool active = name.Equals(_currentTarget, StringComparison.OrdinalIgnoreCase);
-            header.BackColor = active ? Color.FromArgb(60, 90, 150) : Color.FromArgb(45, 45, 60);
-            header.ForeColor = active ? Color.White : Color.LightGray;
+            header.BackColor = dropTarget ? Color.FromArgb(180, 120, 40)
+                             : active ? Color.FromArgb(60, 90, 150)
+                             : Color.FromArgb(45, 45, 60);
+            header.ForeColor = active || dropTarget ? Color.White : Color.LightGray;
         }
+    }
+
+    // Which stacked pane (by channel name) is under the given screen point
+    private string? PaneChannelAt(Point screenPoint)
+    {
+        for (int i = 0; i < _splitPanes.Count && i < _splitChannels.Count; i++)
+        {
+            var pane = _splitPanes[i];
+            if (!pane.IsDisposed && pane.RectangleToScreen(pane.ClientRectangle).Contains(screenPoint))
+                return _splitChannels[i];
+        }
+        return null;
+    }
+
+    private void SwapSplitPanes(string from, string to)
+    {
+        int i = _splitChannels.FindIndex(c => c.Equals(from, StringComparison.OrdinalIgnoreCase));
+        int j = _splitChannels.FindIndex(c => c.Equals(to, StringComparison.OrdinalIgnoreCase));
+        if (i < 0 || j < 0 || i == j) return;
+        (_splitChannels[i], _splitChannels[j]) = (_splitChannels[j], _splitChannels[i]);
+        BuildSplit([.. _splitChannels], _splitHorizontal);
     }
 
     // Rebuilds (or exits) the split when one of its channels closes
