@@ -99,7 +99,11 @@ public class ConnectionEditForm : Form
             Height = LogicalToDeviceUnits(40),
             Padding = new Padding(LogicalToDeviceUnits(10))
         };
-        cancelBtn.Margin = new Padding(LogicalToDeviceUnits(4), 0, 0, 0);
+        // Identical margins on both so they line up: the default Button margin
+        // (3,3,3,3) on one and a custom margin on the other left them vertically
+        // offset. Only the gap between them (left margin on cancel) differs.
+        okBtn.Margin = new Padding(0);
+        cancelBtn.Margin = new Padding(LogicalToDeviceUnits(6), 0, 0, 0);
         btnPanel.Controls.Add(cancelBtn);
         btnPanel.Controls.Add(okBtn);
 
