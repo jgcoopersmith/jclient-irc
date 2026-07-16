@@ -138,12 +138,17 @@ public partial class MainForm : Form
         connectOptions.DropDownItems.Add(reconnectOnDisconnectItem);
         optionsItem.DropDownItems.Add(connectOptions);
         var logOptions = new ToolStripMenuItem("Log");
-        string LogDirDisplay() => string.IsNullOrEmpty(_settings.LogDirectory)
+        string LogToggleText() => !_settings.LoggingEnabled
             ? "Logging: off"
-            : $"Logging to: {_settings.LogDirectory}";
-        var currentLogDirItem = new ToolStripMenuItem(LogDirDisplay()) { Enabled = false };
-        var setLogDirItem = new ToolStripMenuItem("Set Log Directory...");
-        setLogDirItem.Click += (s, e) =>
+            : string.IsNullOrEmpty(_settings.LogDirectory)
+                ? "Logging: on (no folder set)"
+                : $"Logging: on — {_settings.LogDirectory}";
+        var logToggleItem = new ToolStripMenuItem(LogToggleText())
+        {
+            CheckOnClick = true,
+            Checked = _settings.LoggingEnabled
+        };
+        bool BrowseForLogDir()
         {
             using var dlg = new FolderBrowserDialog
             {
@@ -151,24 +156,33 @@ public partial class MainForm : Form
                 UseDescriptionForTitle = true,
                 InitialDirectory = _settings.LogDirectory
             };
-            if (dlg.ShowDialog(this) == DialogResult.OK)
-            {
-                _settings.LogDirectory = dlg.SelectedPath;
-                SettingsStore.Save(_settings);
-                currentLogDirItem.Text = LogDirDisplay();
-            }
-        };
-        var disableLogItem = new ToolStripMenuItem("Disable Logging");
-        disableLogItem.Click += (s, e) =>
+            if (dlg.ShowDialog(this) != DialogResult.OK) return false;
+            _settings.LogDirectory = dlg.SelectedPath;
+            return true;
+        }
+        var setLogDirItem = new ToolStripMenuItem("Set Log Directory...");
+        setLogDirItem.Click += (s, e) =>
         {
-            _settings.LogDirectory = "";
+            if (!BrowseForLogDir()) return;
             SettingsStore.Save(_settings);
-            currentLogDirItem.Text = LogDirDisplay();
+            logToggleItem.Text = LogToggleText();
+        };
+        logToggleItem.CheckedChanged += (s, e) =>
+        {
+            // Switching on without a folder configured prompts for one; cancelling
+            // the browse leaves the toggle off.
+            if (logToggleItem.Checked && string.IsNullOrEmpty(_settings.LogDirectory) && !BrowseForLogDir())
+            {
+                logToggleItem.Checked = false; // re-enters this handler on the off path
+                return;
+            }
+            _settings.LoggingEnabled = logToggleItem.Checked;
+            SettingsStore.Save(_settings);
+            logToggleItem.Text = LogToggleText();
         };
         logOptions.DropDownItems.Add(setLogDirItem);
-        logOptions.DropDownItems.Add(disableLogItem);
         logOptions.DropDownItems.Add(new ToolStripSeparator());
-        logOptions.DropDownItems.Add(currentLogDirItem);
+        logOptions.DropDownItems.Add(logToggleItem);
         optionsItem.DropDownItems.Add(logOptions);
         var aboutOptions = new ToolStripMenuItem("About");
         // Version comes from <Version> in the csproj; strip any "+commit" suffix
@@ -746,7 +760,7 @@ public partial class MainForm : Form
     private void WriteToLogFile(string target, string text)
     {
         var dir = _settings.LogDirectory;
-        if (string.IsNullOrEmpty(dir)) return;
+        if (!_settings.LoggingEnabled || string.IsNullOrEmpty(dir)) return;
         try
         {
             Directory.CreateDirectory(dir);

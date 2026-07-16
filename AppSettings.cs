@@ -9,6 +9,11 @@ public class AppSettings
     // first saved connection if this name no longer exists.
     public string LastConnectionName { get; set; } = "";
 
-    // Catch-all directory for all logging; empty disables logging.
+    // Catch-all directory for all logging; empty means nothing is written.
     public string LogDirectory { get; set; } = "";
+
+    // Master on/off toggle for logging (File > Options > Log). Defaults to on
+    // so settings saved before this flag existed keep logging to their
+    // already-configured directory.
+    public bool LoggingEnabled { get; set; } = true;
 }
