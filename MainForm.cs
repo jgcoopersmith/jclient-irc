@@ -55,6 +55,11 @@ public partial class MainForm : Form
     private string? _dragSourceChannel;
     private string? _dropTargetChannel;
 
+    // Open channel-settings dialog fed by 367/368 ban-list replies, and the
+    // channel it's showing.
+    private ChannelSettingsForm? _channelSettingsForm;
+    private string? _channelSettingsChannel;
+
     // Version as shown in About: Application.ProductVersion minus the SDK's
     // "+commithash" suffix. Used for the quit message and CTCP VERSION replies.
     private static string VersionString
@@ -301,6 +306,12 @@ public partial class MainForm : Form
         stackHItem.Click += (s, e) => EnterSplit(horizontal: true);
         var stackVItem = new ToolStripMenuItem("Stack Vertical");
         stackVItem.Click += (s, e) => EnterSplit(horizontal: false);
+        var channelSettingsItem = new ToolStripMenuItem("Channel Settings...");
+        channelSettingsItem.Click += (s, e) =>
+        {
+            if (_rightClickedTab != null)
+                OpenChannelSettings(_rightClickedTab.Text);
+        };
         var logWindowItem = new ToolStripMenuItem("Stop Logging");
         logWindowItem.Click += (s, e) =>
         {
@@ -321,6 +332,7 @@ public partial class MainForm : Form
         tabMenu.Items.Add(stackHItem);
         tabMenu.Items.Add(stackVItem);
         tabMenu.Items.Add(new ToolStripSeparator());
+        tabMenu.Items.Add(channelSettingsItem);
         tabMenu.Items.Add(logWindowItem);
         tabMenu.Items.Add(new ToolStripSeparator());
         tabMenu.Items.Add(closeItem);
@@ -333,6 +345,9 @@ public partial class MainForm : Form
                 {
                     _rightClickedTab = tab;
                     closeItem.Enabled = tab.Text != "(server)";
+                    bool isChannel = tab.Text.StartsWith('#') || tab.Text.StartsWith('&');
+                    channelSettingsItem.Visible = isChannel;
+                    channelSettingsItem.Enabled = isChannel && (_irc?.IsConnected ?? false);
                     logWindowItem.Text = IsWindowLoggingStopped(tab.Text) ? "Start Logging" : "Stop Logging";
                     tabMenu.Show(_tabs, e.Location);
                 }
@@ -620,6 +635,23 @@ public partial class MainForm : Form
             ExitSplit();
         else
             BuildSplit([.. _splitChannels], _splitHorizontal);
+    }
+
+    private void OpenChannelSettings(string channel)
+    {
+        if (_irc is not { IsConnected: true }) return;
+        _channelModes.TryGetValue(channel, out var modes);
+        _topics.TryGetValue(channel, out var topic);
+
+        using var dlg = new ChannelSettingsForm(channel, topic ?? "", modes ?? "",
+            line => _ = _irc?.SendRawAsync(line));
+        _channelSettingsForm = dlg;
+        _channelSettingsChannel = channel;
+        // Request the ban list; 367/368 replies arrive during ShowDialog's modal
+        // loop (posted callbacks still pump) and are forwarded to the dialog.
+        _ = _irc.SendRawAsync($"MODE {channel} +b");
+        try { dlg.ShowDialog(this); }
+        finally { _channelSettingsForm = null; _channelSettingsChannel = null; }
     }
 
     private void BuildLibraryPanel()
@@ -1198,6 +1230,19 @@ public partial class MainForm : Form
                 }
                 break;
             }
+
+            case "367": // RPL_BANLIST — one ban mask; params: [me, chan, mask, whoset, when]
+            {
+                var channel = msg.Params.Length > 1 ? msg.Params[1] : "";
+                var mask = msg.Params.Length > 2 ? msg.Params[2] : "";
+                if (_channelSettingsForm != null && mask.Length > 0
+                    && channel.Equals(_channelSettingsChannel, StringComparison.OrdinalIgnoreCase))
+                    _channelSettingsForm.AddBan(mask);
+                break;
+            }
+
+            case "368": // RPL_ENDOFBANLIST — nothing more to collect
+                break;
 
             case "331": // RPL_NOTOPIC
             {
