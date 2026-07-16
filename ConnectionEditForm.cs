@@ -43,7 +43,7 @@ public class ConnectionEditForm : Form
         {
             _serverBox.Text = "irc.rizon.net";
             _portBox.Text = "6667";
-            _nickBox.Text = "IRCUser" + new Random().Next(100, 999);
+            _nickBox.Text = "jclient" + new Random().Next(100, 1000);
         }
 
         var layout = new TableLayoutPanel
