@@ -1031,16 +1031,22 @@ public partial class MainForm : Form
                     else if (verb == "VERSION")
                     {
                         _ = _irc?.SendRawAsync($"NOTICE {nick} :\x01VERSION jclient irc by j0ker {VersionString}\x01");
-                        AppendLine("(server)", $"*** CTCP VERSION request from {nick}", Color.DimGray);
+                        AppendLine(displayTarget, $"*** CTCP VERSION request from {nick}", Color.DimGray);
                     }
                     else if (verb == "PING")
                     {
+                        // Echo the payload verbatim so the requester can time the round trip
                         _ = _irc?.SendRawAsync($"NOTICE {nick} :\x01{ctcp}\x01");
-                        AppendLine("(server)", $"*** CTCP PING request from {nick}", Color.DimGray);
+                        AppendLine(displayTarget, $"*** CTCP PING request from {nick}", Color.DimGray);
+                    }
+                    else if (verb == "TIME")
+                    {
+                        _ = _irc?.SendRawAsync($"NOTICE {nick} :\x01TIME {DateTime.Now:ddd MMM dd HH:mm:ss yyyy}\x01");
+                        AppendLine(displayTarget, $"*** CTCP TIME request from {nick}", Color.DimGray);
                     }
                     else
                     {
-                        AppendLine("(server)", $"*** CTCP {verb} request from {nick}", Color.DimGray);
+                        AppendLine(displayTarget, $"*** CTCP {verb} request from {nick}", Color.DimGray);
                     }
                     break;
                 }
