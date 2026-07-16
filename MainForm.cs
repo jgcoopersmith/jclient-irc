@@ -208,19 +208,17 @@ public partial class MainForm : Form
         logOptions.DropDownItems.Add(new ToolStripSeparator());
         logOptions.DropDownItems.Add(logToggleItem);
         optionsItem.DropDownItems.Add(logOptions);
-        var aboutOptions = new ToolStripMenuItem("About");
-        // Version comes from <Version> in the csproj; strip any "+commit" suffix
-        // the SDK appends to the informational version.
-        var version = Application.ProductVersion;
-        int plusIdx = version.IndexOf('+');
-        if (plusIdx >= 0) version = version[..plusIdx];
-        aboutOptions.DropDownItems.Add(new ToolStripMenuItem("jclient irc for Windows by j0ker") { Enabled = false });
-        aboutOptions.DropDownItems.Add(new ToolStripMenuItem($"version {version}") { Enabled = false });
-        optionsItem.DropDownItems.Add(aboutOptions);
+        var aboutItem = new ToolStripMenuItem("About");
+        // Disabled info items carry gray text by default; ForeColor forces black
+        // so the bold shows clearly. VersionString strips the SDK's +commit suffix.
+        var boldFont = new Font(_menu.Font, FontStyle.Bold);
+        aboutItem.DropDownItems.Add(new ToolStripMenuItem("jclient irc for Windows by j0ker") { Enabled = false, Font = boldFont, ForeColor = Color.Black });
+        aboutItem.DropDownItems.Add(new ToolStripMenuItem($"version {VersionString}") { Enabled = false, Font = boldFont, ForeColor = Color.Black });
         var exitItem = new ToolStripMenuItem("Exit");
         exitItem.Click += (s, e) => Close();
         fileMenu.DropDownItems.Add(disconnectItem);
         fileMenu.DropDownItems.Add(optionsItem);
+        fileMenu.DropDownItems.Add(aboutItem);
         fileMenu.DropDownItems.Add(new ToolStripSeparator());
         fileMenu.DropDownItems.Add(exitItem);
         _menu.Items.Add(fileMenu);
