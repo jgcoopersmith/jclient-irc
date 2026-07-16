@@ -24,4 +24,14 @@ public class AppSettings
     // Optional custom CTCP VERSION reply; when non-empty it replaces the
     // built-in "jclient irc by j0ker <version>" response.
     public string CustomVersionReply { get; set; } = "";
+
+    // View menu
+    public bool KeepOnTop { get; set; }
+
+    // "Default font" — when set, this font is enforced across the whole app.
+    // Empty family means no override (controls keep their own fonts).
+    public string DefaultFontFamily { get; set; } = "";
+    public float DefaultFontSize { get; set; } = 9f;
+    public int DefaultFontStyle { get; set; } // System.Drawing.FontStyle as int
+    public bool DefaultFontEnabled { get; set; }
 }

@@ -269,6 +269,46 @@ public partial class MainForm : Form
         fileMenu.DropDownItems.Add(new ToolStripSeparator());
         fileMenu.DropDownItems.Add(exitItem);
         _menu.Items.Add(fileMenu);
+
+        // View menu
+        var viewMenu = new ToolStripMenuItem("View");
+        var fullScreenItem = new ToolStripMenuItem("Full screen") { CheckOnClick = true, ShortcutKeys = Keys.F11 };
+        fullScreenItem.CheckedChanged += (s, e) => SetFullScreen(fullScreenItem.Checked);
+        var keepOnTopItem = new ToolStripMenuItem("Keep on top") { CheckOnClick = true, Checked = _settings.KeepOnTop };
+        keepOnTopItem.CheckedChanged += (s, e) =>
+        {
+            TopMost = keepOnTopItem.Checked;
+            _settings.KeepOnTop = keepOnTopItem.Checked;
+            SettingsStore.Save(_settings);
+        };
+        var fontMenu = new ToolStripMenuItem("Font");
+        var pickFontItem = new ToolStripMenuItem("Choose Font...");
+        var defaultFontItem = new ToolStripMenuItem("Default font (enforce app-wide)") { CheckOnClick = true, Checked = _settings.DefaultFontEnabled };
+        pickFontItem.Click += (s, e) =>
+        {
+            using var fd = new FontDialog { Font = CurrentDefaultFont() ?? Font, ShowEffects = false };
+            if (fd.ShowDialog(this) != DialogResult.OK) return;
+            _settings.DefaultFontFamily = fd.Font.FontFamily.Name;
+            _settings.DefaultFontSize = fd.Font.Size;
+            _settings.DefaultFontStyle = (int)fd.Font.Style;
+            SettingsStore.Save(_settings);
+            if (_settings.DefaultFontEnabled) ApplyDefaultFont();
+        };
+        defaultFontItem.CheckedChanged += (s, e) =>
+        {
+            _settings.DefaultFontEnabled = defaultFontItem.Checked;
+            SettingsStore.Save(_settings);
+            ApplyDefaultFont();
+        };
+        fontMenu.DropDownItems.Add(pickFontItem);
+        fontMenu.DropDownItems.Add(new ToolStripSeparator());
+        fontMenu.DropDownItems.Add(defaultFontItem);
+        viewMenu.DropDownItems.Add(fullScreenItem);
+        viewMenu.DropDownItems.Add(keepOnTopItem);
+        viewMenu.DropDownItems.Add(new ToolStripSeparator());
+        viewMenu.DropDownItems.Add(fontMenu);
+        _menu.Items.Add(viewMenu);
+
         MainMenuStrip = _menu;
 
         // Add order matters for docking: controls are docked in reverse of Controls.Add
@@ -450,6 +490,10 @@ public partial class MainForm : Form
             inputMenu.Items[2].Enabled = Clipboard.ContainsText();
         };
         _inputBox.ContextMenuStrip = inputMenu;
+
+        // Apply persisted View settings
+        TopMost = _settings.KeepOnTop;
+        if (_settings.DefaultFontEnabled) ApplyDefaultFont();
     }
 
     private TabPage? TabPageAt(Point p)
@@ -677,6 +721,52 @@ public partial class MainForm : Form
             ExitSplit();
         else
             BuildSplit([.. _splitChannels], _splitHorizontal);
+    }
+
+    private FormBorderStyle _preFullScreenBorder;
+    private FormWindowState _preFullScreenState;
+
+    private void SetFullScreen(bool on)
+    {
+        if (on)
+        {
+            _preFullScreenBorder = FormBorderStyle;
+            _preFullScreenState = WindowState;
+            FormBorderStyle = FormBorderStyle.None;
+            WindowState = FormWindowState.Normal; // must leave Maximized before restyling
+            WindowState = FormWindowState.Maximized;
+        }
+        else
+        {
+            FormBorderStyle = _preFullScreenBorder;
+            WindowState = _preFullScreenState;
+        }
+    }
+
+    // The user's configured default font, or null if none has been chosen
+    private Font? CurrentDefaultFont() =>
+        string.IsNullOrEmpty(_settings.DefaultFontFamily)
+            ? null
+            : new Font(_settings.DefaultFontFamily, _settings.DefaultFontSize, (FontStyle)_settings.DefaultFontStyle);
+
+    // Applies (or clears) the app-wide default font across every control
+    private void ApplyDefaultFont()
+    {
+        var font = _settings.DefaultFontEnabled ? CurrentDefaultFont() : null;
+        // Fall back to the baseline UI font when the override is off
+        var effective = font ?? new Font("Segoe UI", 9f);
+        Font = effective;
+        void Recurse(Control.ControlCollection controls)
+        {
+            foreach (Control c in controls)
+            {
+                c.Font = effective;
+                Recurse(c.Controls);
+            }
+        }
+        Recurse(Controls);
+        _menu.Font = effective;
+        UpdateAllHeaders();
     }
 
     // Minimal single-line text prompt (WinForms has no built-in InputBox).
