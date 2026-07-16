@@ -19,6 +19,11 @@ public partial class MainForm : Form
     private readonly Dictionary<string, string> _topics = new(StringComparer.OrdinalIgnoreCase);
     private string? _activeServer;
 
+    // Channel modes (e.g. "+tn", plus key/limit args), from 324 replies to the
+    // MODE query sent on join and re-queried after any mode change; shown in
+    // the window header between server and topic.
+    private readonly Dictionary<string, string> _channelModes = new(StringComparer.OrdinalIgnoreCase);
+
     // Who is in each channel (from NAMES on join, then joins/parts/kicks/modes),
     // mapping nick -> mode flags ("o" op, "v" voice, "ov", or ""). Used to scope
     // quit/nick messages to the right channels and to prefix speakers' nicks.
@@ -387,6 +392,7 @@ public partial class MainForm : Form
         _ctrlSelectedTabs.Remove(name);
         _topics.Remove(name);
         _channelUsers.Remove(name);
+        _channelModes.Remove(name);
         _tabs.TabPages.Remove(ch.tab);
 
         if (_currentTarget.Equals(name, StringComparison.OrdinalIgnoreCase))
@@ -712,6 +718,8 @@ public partial class MainForm : Form
         var text = name;
         if (_irc is { IsConnected: true, CurrentNick: not null } && _activeServer != null)
             text += $"{gap}{_irc.CurrentNick} @ {_activeServer}";
+        if (_channelModes.TryGetValue(name, out var modes) && modes.Length > 0)
+            text += $"{gap}{modes}";
         if (_topics.TryGetValue(name, out var topic) && topic.Length > 0)
             text += $"{gap}{topic}";
         return text;
@@ -928,10 +936,14 @@ public partial class MainForm : Form
                 var nick = msg.PrefixNick ?? "";
                 if (!_channels.ContainsKey(channel))
                     AddChannelTab(channel);
-                // Our own join starts a fresh membership list (NAMES follows);
-                // anyone else's join adds them to it with no status yet.
+                // Our own join starts a fresh membership list (NAMES follows) and
+                // queries the channel modes (server answers with 324); anyone
+                // else's join adds them to the list with no status yet.
                 if (nick.Equals(_irc?.CurrentNick, StringComparison.OrdinalIgnoreCase))
+                {
                     UsersOf(channel).Clear();
+                    _ = _irc?.SendRawAsync($"MODE {channel}");
+                }
                 UsersOf(channel)[nick] = "";
                 // Deliberately no _tabs.SelectedTab change here: tabs only switch
                 // when the user clicks one. The unread highlight marks the new tab.
@@ -955,6 +967,7 @@ public partial class MainForm : Form
                     _ctrlSelectedTabs.Remove(channel);
                     _topics.Remove(channel);
                     _channelUsers.Remove(channel);
+                    _channelModes.Remove(channel);
                     _tabs.TabPages.Remove(ch.tab);
                     if (_currentTarget.Equals(channel, StringComparison.OrdinalIgnoreCase))
                     {
@@ -1030,6 +1043,9 @@ public partial class MainForm : Form
                     else if (m == 'v') SetUserFlag(users, arg, 'v', adding);
                 }
                 AppendLine(target, $"*** {msg.PrefixNick ?? msg.Prefix ?? "server"} sets mode {string.Join(" ", msg.Params.Skip(1))}", Color.LightBlue);
+                // Re-query rather than replaying mode arithmetic locally: the 324
+                // reply is authoritative and refreshes the header's mode display.
+                _ = _irc?.SendRawAsync($"MODE {target}");
                 break;
             }
 
@@ -1041,6 +1057,17 @@ public partial class MainForm : Form
                 {
                     _topics[channel] = topic;
                     AppendLine(channel, $"*** Topic: {topic}", Color.DimGray);
+                    UpdateAllHeaders();
+                }
+                break;
+            }
+
+            case "324": // RPL_CHANNELMODEIS — reply to our MODE query
+            {
+                var channel = msg.Params.Length > 1 ? msg.Params[1] : "";
+                if (channel.Length > 0)
+                {
+                    _channelModes[channel] = string.Join(" ", msg.Params.Skip(2));
                     UpdateAllHeaders();
                 }
                 break;
