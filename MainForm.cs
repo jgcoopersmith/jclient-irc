@@ -862,13 +862,13 @@ public partial class MainForm : Form
         users[nick] = flags;
     }
 
-    // "@nick" for ops, "Vnick" for voiced, bare nick otherwise
+    // "@nick" for ops, "+nick" for voiced, bare nick otherwise
     private string DisplayNick(string target, string nick)
     {
         if (_channelUsers.TryGetValue(target, out var users) && users.TryGetValue(nick, out var flags))
         {
             if (flags.Contains('o')) return "@" + nick;
-            if (flags.Contains('v')) return "V" + nick;
+            if (flags.Contains('v')) return "+" + nick;
         }
         return nick;
     }
