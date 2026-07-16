@@ -55,6 +55,19 @@ public partial class MainForm : Form
     private string? _dragSourceChannel;
     private string? _dropTargetChannel;
 
+    // Default QUIT message: "jclient <version>", version as shown in About
+    // (Application.ProductVersion minus the SDK's "+commithash" suffix)
+    private static string QuitMessage
+    {
+        get
+        {
+            var v = Application.ProductVersion;
+            int plus = v.IndexOf('+');
+            if (plus >= 0) v = v[..plus];
+            return $"jclient {v}";
+        }
+    }
+
     // Controls
     private readonly TableLayoutPanel _mainLayout = new() { Dock = DockStyle.Fill, RowCount = 2, ColumnCount = 1 };
     private readonly TabControl _tabs = new() { Dock = DockStyle.Fill };
@@ -920,7 +933,7 @@ public partial class MainForm : Form
     private async void OnDisconnect(object? s, EventArgs e)
     {
         if (_irc == null) return;
-        try { await _irc.QuitAsync("jclient"); }
+        try { await _irc.QuitAsync(QuitMessage); }
         catch { } // connection may already be dead; QUIT is best-effort
         _irc?.Dispose();
         _irc = null;
@@ -1275,7 +1288,7 @@ public partial class MainForm : Form
                 // An explicit /quit message wins over the default; either way,
                 // the window-close path must not send a second QUIT afterwards.
                 _explicitQuit = true;
-                await _irc.QuitAsync(rest.Length > 0 ? rest : "jclient");
+                await _irc.QuitAsync(rest.Length > 0 ? rest : QuitMessage);
                 break;
             case "TOPIC":
             {
@@ -1320,7 +1333,7 @@ public partial class MainForm : Form
         // already issued an explicit /quit, whose message must stand.
         if (!_explicitQuit && _irc is { IsConnected: true })
         {
-            try { _irc.QuitAsync("jclient").Wait(500); }
+            try { _irc.QuitAsync(QuitMessage).Wait(500); }
             catch { }
         }
         base.OnFormClosing(e);
