@@ -16,4 +16,8 @@ public class AppSettings
     // so settings saved before this flag existed keep logging to their
     // already-configured directory.
     public bool LoggingEnabled { get; set; } = true;
+
+    // Windows (channel/PM/server tab names) excluded from logging via the
+    // tab's right-click Start/Stop Logging toggle.
+    public List<string> LoggingDisabledWindows { get; set; } = [];
 }

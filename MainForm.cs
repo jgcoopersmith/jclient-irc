@@ -284,6 +284,17 @@ public partial class MainForm : Form
         stackHItem.Click += (s, e) => EnterSplit(horizontal: true);
         var stackVItem = new ToolStripMenuItem("Stack Vertical");
         stackVItem.Click += (s, e) => EnterSplit(horizontal: false);
+        var logWindowItem = new ToolStripMenuItem("Stop Logging");
+        logWindowItem.Click += (s, e) =>
+        {
+            if (_rightClickedTab == null) return;
+            var name = _rightClickedTab.Text;
+            if (IsWindowLoggingStopped(name))
+                _settings.LoggingDisabledWindows.RemoveAll(w => w.Equals(name, StringComparison.OrdinalIgnoreCase));
+            else
+                _settings.LoggingDisabledWindows.Add(name);
+            SettingsStore.Save(_settings);
+        };
         var closeItem = new ToolStripMenuItem("Close");
         closeItem.Click += async (s, e) =>
         {
@@ -292,6 +303,8 @@ public partial class MainForm : Form
         };
         tabMenu.Items.Add(stackHItem);
         tabMenu.Items.Add(stackVItem);
+        tabMenu.Items.Add(new ToolStripSeparator());
+        tabMenu.Items.Add(logWindowItem);
         tabMenu.Items.Add(new ToolStripSeparator());
         tabMenu.Items.Add(closeItem);
         _tabs.MouseDown += (s, e) =>
@@ -303,6 +316,7 @@ public partial class MainForm : Form
                 {
                     _rightClickedTab = tab;
                     closeItem.Enabled = tab.Text != "(server)";
+                    logWindowItem.Text = IsWindowLoggingStopped(tab.Text) ? "Start Logging" : "Stop Logging";
                     tabMenu.Show(_tabs, e.Location);
                 }
             }
@@ -765,10 +779,13 @@ public partial class MainForm : Form
     // Appends the line to <LogDirectory>\<window>.log when a log directory is
     // configured (File > Options > Log). Failures are swallowed: logging must
     // never take the client down mid-conversation.
+    private bool IsWindowLoggingStopped(string name) =>
+        _settings.LoggingDisabledWindows.Any(w => w.Equals(name, StringComparison.OrdinalIgnoreCase));
+
     private void WriteToLogFile(string target, string text)
     {
         var dir = _settings.LogDirectory;
-        if (!_settings.LoggingEnabled || string.IsNullOrEmpty(dir)) return;
+        if (!_settings.LoggingEnabled || string.IsNullOrEmpty(dir) || IsWindowLoggingStopped(target)) return;
         try
         {
             Directory.CreateDirectory(dir);
