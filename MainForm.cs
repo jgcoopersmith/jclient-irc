@@ -64,6 +64,9 @@ public partial class MainForm : Form
     // different one closes them all.
     private string? _windowsServer;
 
+    // The bold "Connections" label; kept so font re-application preserves bold
+    private Label? _libraryHeader;
+
     // Closes every window except (server) and clears all per-channel state
     private void CloseAllChannelWindows()
     {
@@ -283,6 +286,8 @@ public partial class MainForm : Form
         };
         var fontMenu = new ToolStripMenuItem("Font");
         var pickFontItem = new ToolStripMenuItem("Choose Font...");
+        var pickChannelFontItem = new ToolStripMenuItem("Choose Channel Font...");
+        var channelFontItem = new ToolStripMenuItem("Default channel font (chat windows only)") { CheckOnClick = true, Checked = _settings.ChannelFontEnabled };
         var defaultFontItem = new ToolStripMenuItem("Default font (enforce app-wide)") { CheckOnClick = true, Checked = _settings.DefaultFontEnabled };
         pickFontItem.Click += (s, e) =>
         {
@@ -292,16 +297,34 @@ public partial class MainForm : Form
             _settings.DefaultFontSize = fd.Font.Size;
             _settings.DefaultFontStyle = (int)fd.Font.Style;
             SettingsStore.Save(_settings);
-            if (_settings.DefaultFontEnabled) ApplyDefaultFont();
+            if (_settings.DefaultFontEnabled) ApplyFonts();
+        };
+        pickChannelFontItem.Click += (s, e) =>
+        {
+            using var fd = new FontDialog { Font = CurrentChannelFont() ?? new Font("Consolas", 9.5f), ShowEffects = false };
+            if (fd.ShowDialog(this) != DialogResult.OK) return;
+            _settings.ChannelFontFamily = fd.Font.FontFamily.Name;
+            _settings.ChannelFontSize = fd.Font.Size;
+            _settings.ChannelFontStyle = (int)fd.Font.Style;
+            SettingsStore.Save(_settings);
+            if (_settings.ChannelFontEnabled) ApplyFonts();
+        };
+        channelFontItem.CheckedChanged += (s, e) =>
+        {
+            _settings.ChannelFontEnabled = channelFontItem.Checked;
+            SettingsStore.Save(_settings);
+            ApplyFonts();
         };
         defaultFontItem.CheckedChanged += (s, e) =>
         {
             _settings.DefaultFontEnabled = defaultFontItem.Checked;
             SettingsStore.Save(_settings);
-            ApplyDefaultFont();
+            ApplyFonts();
         };
         fontMenu.DropDownItems.Add(pickFontItem);
+        fontMenu.DropDownItems.Add(pickChannelFontItem);
         fontMenu.DropDownItems.Add(new ToolStripSeparator());
+        fontMenu.DropDownItems.Add(channelFontItem);
         fontMenu.DropDownItems.Add(defaultFontItem);
         viewMenu.DropDownItems.Add(fullScreenItem);
         viewMenu.DropDownItems.Add(keepOnTopItem);
@@ -493,7 +516,7 @@ public partial class MainForm : Form
 
         // Apply persisted View settings
         TopMost = _settings.KeepOnTop;
-        if (_settings.DefaultFontEnabled) ApplyDefaultFont();
+        if (_settings.DefaultFontEnabled || _settings.ChannelFontEnabled) ApplyFonts();
     }
 
     private TabPage? TabPageAt(Point p)
@@ -749,12 +772,27 @@ public partial class MainForm : Form
             ? null
             : new Font(_settings.DefaultFontFamily, _settings.DefaultFontSize, (FontStyle)_settings.DefaultFontStyle);
 
-    // Applies (or clears) the app-wide default font across every control
-    private void ApplyDefaultFont()
+    // The user's configured channel font, or null if none has been chosen
+    private Font? CurrentChannelFont() =>
+        string.IsNullOrEmpty(_settings.ChannelFontFamily)
+            ? null
+            : new Font(_settings.ChannelFontFamily, _settings.ChannelFontSize, (FontStyle)_settings.ChannelFontStyle);
+
+    // Font for a message log: channel font wins in chat channel windows, then
+    // the app-wide default font, then the built-in Consolas.
+    private Font LogFontFor(string name)
     {
-        var font = _settings.DefaultFontEnabled ? CurrentDefaultFont() : null;
-        // Fall back to the baseline UI font when the override is off
-        var effective = font ?? new Font("Segoe UI", 9f);
+        bool isChannel = name.StartsWith('#') || name.StartsWith('&');
+        if (isChannel && _settings.ChannelFontEnabled && CurrentChannelFont() is { } cf) return cf;
+        if (_settings.DefaultFontEnabled && CurrentDefaultFont() is { } df) return df;
+        return new Font("Consolas", 9.5f);
+    }
+
+    // Applies the font settings across the app: the app-wide default (or the
+    // baseline Segoe UI when off) everywhere, then per-window log fonts.
+    private void ApplyFonts()
+    {
+        var effective = (_settings.DefaultFontEnabled ? CurrentDefaultFont() : null) ?? new Font("Segoe UI", 9f);
         Font = effective;
         void Recurse(Control.ControlCollection controls)
         {
@@ -766,6 +804,11 @@ public partial class MainForm : Form
         }
         Recurse(Controls);
         _menu.Font = effective;
+        // Restore the specials the blanket pass flattened
+        _inputBox.Font = _settings.DefaultFontEnabled && CurrentDefaultFont() is { } d ? d : new Font("Consolas", 10);
+        if (_libraryHeader != null) _libraryHeader.Font = new Font(effective, FontStyle.Bold);
+        foreach (var (name, ch) in _channels)
+            ch.log.Font = LogFontFor(name);
         UpdateAllHeaders();
     }
 
@@ -823,6 +866,7 @@ public partial class MainForm : Form
             Height = LogicalToDeviceUnits(22),
             Font = new Font(Font, FontStyle.Bold)
         };
+        _libraryHeader = header;
 
         var btnLayout = new TableLayoutPanel { Dock = DockStyle.Bottom, Height = LogicalToDeviceUnits(94), ColumnCount = 2, RowCount = 3 };
         btnLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50));
@@ -964,7 +1008,7 @@ public partial class MainForm : Form
             ReadOnly = true,
             BackColor = Color.FromArgb(20, 20, 30),
             ForeColor = Color.LightGray,
-            Font = new Font("Consolas", 9.5f),
+            Font = LogFontFor(name),
             ScrollBars = RichTextBoxScrollBars.Vertical,
             WordWrap = true
         };

@@ -34,4 +34,11 @@ public class AppSettings
     public float DefaultFontSize { get; set; } = 9f;
     public int DefaultFontStyle { get; set; } // System.Drawing.FontStyle as int
     public bool DefaultFontEnabled { get; set; }
+
+    // "Default channel font" — like the default font, but applied only to
+    // chat channel windows (#/& logs). Wins over the default font there.
+    public string ChannelFontFamily { get; set; } = "";
+    public float ChannelFontSize { get; set; } = 9.5f;
+    public int ChannelFontStyle { get; set; }
+    public bool ChannelFontEnabled { get; set; }
 }
