@@ -60,6 +60,32 @@ public partial class MainForm : Form
     private ChannelSettingsForm? _channelSettingsForm;
     private string? _channelSettingsChannel;
 
+    // Which server the current channel windows belong to; connecting to a
+    // different one closes them all.
+    private string? _windowsServer;
+
+    // Closes every window except (server) and clears all per-channel state
+    private void CloseAllChannelWindows()
+    {
+        if (InSplitMode) ExitSplit(); // returns logs to their tabs first
+        foreach (var name in _channels.Keys.Where(k => k != "(server)").ToList())
+        {
+            var ch = _channels[name];
+            _channels.Remove(name);
+            _tabs.TabPages.Remove(ch.tab);
+        }
+        _unreadTabs.Clear();
+        _ctrlSelectedTabs.Clear();
+        _topics.Clear();
+        _channelUsers.Clear();
+        _channelModes.Clear();
+        _currentTarget = "(server)";
+        if (_channels.TryGetValue("(server)", out var srv))
+            _tabs.SelectedTab = srv.tab;
+        _tabs.Invalidate();
+        UpdateAllHeaders();
+    }
+
     // Version as shown in About: Application.ProductVersion minus the SDK's
     // "+commithash" suffix. Used for the quit message and CTCP VERSION replies.
     private static string VersionString
@@ -905,6 +931,13 @@ public partial class MainForm : Form
 
     private async Task ConnectAsync(SavedConnection c)
     {
+        // Connecting to a DIFFERENT server: the old server's channel windows are
+        // stale, so close them. Same-server connects (auto-reconnect, manual
+        // retry) keep their windows and scrollback.
+        if (_windowsServer != null && !_windowsServer.Equals(c.Server, StringComparison.OrdinalIgnoreCase))
+            CloseAllChannelWindows();
+        _windowsServer = c.Server;
+
         _explicitQuit = false; // a fresh connection deserves a clean quit again
         _irc?.Dispose();
         var conn = new IrcConnection();
