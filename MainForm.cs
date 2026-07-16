@@ -189,8 +189,24 @@ public partial class MainForm : Form
             _settings.ReconnectOnDisconnect = reconnectOnDisconnectItem.Checked;
             SettingsStore.Save(_settings);
         };
+        string VersionReplyText() => string.IsNullOrEmpty(_settings.CustomVersionReply)
+            ? "Custom VERSION reply: (default)"
+            : $"Custom VERSION reply: {_settings.CustomVersionReply}";
+        var versionReplyItem = new ToolStripMenuItem(VersionReplyText());
+        versionReplyItem.Click += (s, e) =>
+        {
+            var current = _settings.CustomVersionReply;
+            if (PromptText("Custom CTCP VERSION reply", "Reply sent to VERSION requests (leave blank to use the default):", ref current))
+            {
+                _settings.CustomVersionReply = current.Trim();
+                SettingsStore.Save(_settings);
+                versionReplyItem.Text = VersionReplyText();
+            }
+        };
         connectOptions.DropDownItems.Add(connectOnStartupItem);
         connectOptions.DropDownItems.Add(reconnectOnDisconnectItem);
+        connectOptions.DropDownItems.Add(new ToolStripSeparator());
+        connectOptions.DropDownItems.Add(versionReplyItem);
         optionsItem.DropDownItems.Add(connectOptions);
         var logOptions = new ToolStripMenuItem("Log");
         string LogToggleText() => !_settings.LoggingEnabled
@@ -663,6 +679,34 @@ public partial class MainForm : Form
             BuildSplit([.. _splitChannels], _splitHorizontal);
     }
 
+    // Minimal single-line text prompt (WinForms has no built-in InputBox).
+    private bool PromptText(string title, string prompt, ref string value)
+    {
+        using var dlg = new Form
+        {
+            Text = title,
+            FormBorderStyle = FormBorderStyle.FixedDialog,
+            MaximizeBox = false,
+            MinimizeBox = false,
+            ShowInTaskbar = false,
+            StartPosition = FormStartPosition.CenterParent,
+            Font = new Font("Segoe UI", 9),
+            Icon = AppIcon.Get(),
+            ClientSize = LogicalToDeviceUnits(new Size(440, 120))
+        };
+        int L(int v) => LogicalToDeviceUnits(v);
+        var label = new Label { Text = prompt, Location = new Point(L(12), L(12)), Size = new Size(L(416), L(34)), AutoSize = false };
+        var box = new TextBox { Location = new Point(L(12), L(50)), Size = new Size(L(416), L(24)), Text = value };
+        var ok = new Button { Text = "OK", DialogResult = DialogResult.OK, Size = LogicalToDeviceUnits(new Size(90, 28)), Location = new Point(L(228), L(84)) };
+        var cancel = new Button { Text = "Cancel", DialogResult = DialogResult.Cancel, Size = LogicalToDeviceUnits(new Size(90, 28)), Location = new Point(L(338), L(84)) };
+        dlg.Controls.AddRange([label, box, ok, cancel]);
+        dlg.AcceptButton = ok;
+        dlg.CancelButton = cancel;
+        if (dlg.ShowDialog(this) != DialogResult.OK) return false;
+        value = box.Text;
+        return true;
+    }
+
     private void OpenChannelSettings(string channel)
     {
         if (_irc is not { IsConnected: true }) return;
@@ -1095,7 +1139,10 @@ public partial class MainForm : Form
                     }
                     else if (verb == "VERSION")
                     {
-                        _ = _irc?.SendRawAsync($"NOTICE {nick} :\x01VERSION jclient irc by j0ker {VersionString}\x01");
+                        var reply = string.IsNullOrEmpty(_settings.CustomVersionReply)
+                            ? $"jclient irc by j0ker {VersionString}"
+                            : _settings.CustomVersionReply;
+                        _ = _irc?.SendRawAsync($"NOTICE {nick} :\x01VERSION {reply}\x01");
                         AppendLine(displayTarget, $"*** CTCP VERSION request from {nick}", Color.DimGray);
                     }
                     else if (verb == "PING")

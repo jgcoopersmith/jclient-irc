@@ -20,4 +20,8 @@ public class AppSettings
     // Windows (channel/PM/server tab names) excluded from logging via the
     // tab's right-click Start/Stop Logging toggle.
     public List<string> LoggingDisabledWindows { get; set; } = [];
+
+    // Optional custom CTCP VERSION reply; when non-empty it replaces the
+    // built-in "jclient irc by j0ker <version>" response.
+    public string CustomVersionReply { get; set; } = "";
 }
