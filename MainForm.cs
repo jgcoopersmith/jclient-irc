@@ -19,10 +19,10 @@ public partial class MainForm : Form
     private readonly Dictionary<string, string> _topics = new(StringComparer.OrdinalIgnoreCase);
     private string? _activeServer;
 
-    // Who is in each channel (from NAMES on join, then joins/parts/kicks), so
-    // quit and nick-change messages appear only in the channels that person
-    // was actually in.
-    private readonly Dictionary<string, HashSet<string>> _channelUsers = new(StringComparer.OrdinalIgnoreCase);
+    // Who is in each channel (from NAMES on join, then joins/parts/kicks/modes),
+    // mapping nick -> mode flags ("o" op, "v" voice, "ov", or ""). Used to scope
+    // quit/nick messages to the right channels and to prefix speakers' nicks.
+    private readonly Dictionary<string, Dictionary<string, string>> _channelUsers = new(StringComparer.OrdinalIgnoreCase);
 
     // Input command history, browsed with Up/Down. _historyIndex ==
     // _inputHistory.Count means "past the newest entry" (the live draft).
@@ -833,13 +833,45 @@ public partial class MainForm : Form
         AppendLine("(server)", "*** Disconnected", Color.Orange);
     }
 
-    private HashSet<string> UsersOf(string channel) =>
+    private Dictionary<string, string> UsersOf(string channel) =>
         _channelUsers.TryGetValue(channel, out var set)
             ? set
-            : _channelUsers[channel] = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            : _channelUsers[channel] = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
 
-    // NAMES entries carry status prefixes (@op, +voice, %halfop, ...)
-    private static string StripNickPrefix(string nick) => nick.TrimStart('@', '+', '%', '&', '~');
+    // NAMES entries carry status prefixes: @ (op, also ~ owner / & admin) and
+    // + (voice). Returns (nick, flags).
+    private static (string nick, string flags) ParseNamesEntry(string raw)
+    {
+        var flags = "";
+        int i = 0;
+        while (i < raw.Length && "@+%&~".IndexOf(raw[i]) >= 0)
+        {
+            if (raw[i] is '@' or '&' or '~' && !flags.Contains('o')) flags += "o";
+            else if (raw[i] == '+' && !flags.Contains('v')) flags += "v";
+            i++;
+        }
+        return (raw[i..], flags);
+    }
+
+    private static void SetUserFlag(Dictionary<string, string> users, string nick, char flag, bool on)
+    {
+        users.TryGetValue(nick, out var flags);
+        flags ??= "";
+        if (on && !flags.Contains(flag)) flags += flag;
+        if (!on) flags = flags.Replace(flag.ToString(), "");
+        users[nick] = flags;
+    }
+
+    // "@nick" for ops, "Vnick" for voiced, bare nick otherwise
+    private string DisplayNick(string target, string nick)
+    {
+        if (_channelUsers.TryGetValue(target, out var users) && users.TryGetValue(nick, out var flags))
+        {
+            if (flags.Contains('o')) return "@" + nick;
+            if (flags.Contains('v')) return "V" + nick;
+        }
+        return nick;
+    }
 
     private void OnMessage(IrcMessage msg)
     {
@@ -872,7 +904,7 @@ public partial class MainForm : Form
                 var nick = msg.PrefixNick ?? msg.Prefix ?? "?";
                 // PM to us — show in their nick tab
                 var displayTarget = target.StartsWith('#') || target.StartsWith('&') ? target : nick;
-                AppendLine(displayTarget, $"<{nick}> {text}", Color.White);
+                AppendLine(displayTarget, $"<{DisplayNick(displayTarget, nick)}> {text}", Color.White);
                 break;
             }
 
@@ -883,10 +915,10 @@ public partial class MainForm : Form
                 if (!_channels.ContainsKey(channel))
                     AddChannelTab(channel);
                 // Our own join starts a fresh membership list (NAMES follows);
-                // anyone else's join adds them to it.
+                // anyone else's join adds them to it with no status yet.
                 if (nick.Equals(_irc?.CurrentNick, StringComparison.OrdinalIgnoreCase))
                     UsersOf(channel).Clear();
-                UsersOf(channel).Add(nick);
+                UsersOf(channel)[nick] = "";
                 // Deliberately no _tabs.SelectedTab change here: tabs only switch
                 // when the user clicks one. The unread highlight marks the new tab.
                 AppendLine(channel, $"*** {nick} joined {channel}", Color.LightBlue);
@@ -938,8 +970,9 @@ public partial class MainForm : Form
                 var newNick = msg.Params[0];
                 foreach (var (channel, users) in _channelUsers)
                 {
-                    if (!users.Remove(oldNick)) continue;
-                    users.Add(newNick);
+                    if (!users.TryGetValue(oldNick, out var flags)) continue;
+                    users.Remove(oldNick);
+                    users[newNick] = flags; // op/voice status follows the rename
                     if (_channels.ContainsKey(channel))
                         AppendLine(channel, $"*** {oldNick} is now {newNick}", Color.Plum);
                 }
@@ -952,9 +985,37 @@ public partial class MainForm : Form
                 var channel = msg.Params.Length > 2 ? msg.Params[2] : "";
                 var names = msg.Params.LastOrDefault() ?? "";
                 if (channel.Length > 0)
+                {
                     foreach (var n in names.Split(' ', StringSplitOptions.RemoveEmptyEntries))
-                        UsersOf(channel).Add(StripNickPrefix(n));
+                    {
+                        var (nick, flags) = ParseNamesEntry(n);
+                        if (nick.Length > 0) UsersOf(channel)[nick] = flags;
+                    }
+                }
                 AppendLine(channel, $"*** Users: {names}", Color.DimGray);
+                break;
+            }
+
+            case "MODE":
+            {
+                var target = msg.Params[0];
+                if (!target.StartsWith('#') && !target.StartsWith('&')) break; // ignore user modes
+                var modes = msg.Params.Length > 1 ? msg.Params[1] : "";
+                var users = UsersOf(target);
+                bool adding = true;
+                int argIdx = 2;
+                foreach (var m in modes)
+                {
+                    if (m == '+') { adding = true; continue; }
+                    if (m == '-') { adding = false; continue; }
+                    // modes that consume an argument (RFC 2812 §3.2.3 + common ircd extras)
+                    bool takesArg = m is 'o' or 'v' or 'h' or 'b' or 'e' or 'I' or 'k' || (m == 'l' && adding);
+                    string? arg = takesArg && argIdx < msg.Params.Length ? msg.Params[argIdx++] : null;
+                    if (arg == null) continue;
+                    if (m == 'o') SetUserFlag(users, arg, 'o', adding);
+                    else if (m == 'v') SetUserFlag(users, arg, 'v', adding);
+                }
+                AppendLine(target, $"*** {msg.PrefixNick ?? msg.Prefix ?? "server"} sets mode {string.Join(" ", msg.Params.Skip(1))}", Color.LightBlue);
                 break;
             }
 
@@ -1054,7 +1115,7 @@ public partial class MainForm : Form
         {
             if (_currentTarget is "(server)" or "") return;
             await _irc.PrivMsgAsync(_currentTarget, text);
-            AppendLine(_currentTarget, $"<{_irc.CurrentNick}> {text}", Color.LightYellow);
+            AppendLine(_currentTarget, $"<{DisplayNick(_currentTarget, _irc.CurrentNick ?? "")}> {text}", Color.LightYellow);
         }
     }
 
@@ -1083,7 +1144,7 @@ public partial class MainForm : Form
                 if (args.Length == 2)
                 {
                     await _irc.PrivMsgAsync(args[0], args[1]);
-                    AppendLine(args[0], $"<{_irc.CurrentNick}> {args[1]}", Color.LightYellow);
+                    AppendLine(args[0], $"<{DisplayNick(args[0], _irc.CurrentNick ?? "")}> {args[1]}", Color.LightYellow);
                 }
                 break;
             }
@@ -1108,7 +1169,7 @@ public partial class MainForm : Form
                 {
                     var action = $"\x01ACTION {rest}\x01";
                     await _irc.PrivMsgAsync(_currentTarget, action);
-                    AppendLine(_currentTarget, $"* {_irc.CurrentNick} {rest}", Color.Plum);
+                    AppendLine(_currentTarget, $"* {DisplayNick(_currentTarget, _irc.CurrentNick ?? "")} {rest}", Color.Plum);
                 }
                 break;
             case "RAW":
