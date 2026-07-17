@@ -1356,10 +1356,10 @@ public partial class MainForm : Form
                 var nick = msg.PrefixNick ?? msg.Prefix ?? "?";
                 var displayTarget = target.StartsWith('#') || target.StartsWith('&') ? target : nick;
 
-                // CTCP: text wrapped in \x01. Handle the common queries out of band.
-                if (text.Length >= 2 && text[0] == '\x01' && text[^1] == '\x01')
+                // CTCP: text wrapped in \u0001. Handle the common queries out of band.
+                if (text.Length >= 2 && text[0] == '\u0001' && text[^1] == '\u0001')
                 {
-                    var ctcp = text.Trim('\x01');
+                    var ctcp = text.Trim('\u0001');
                     var verb = ctcp.Split(' ', 2)[0].ToUpperInvariant();
                     if (verb == "ACTION")
                     {
@@ -1371,18 +1371,18 @@ public partial class MainForm : Form
                         var reply = string.IsNullOrEmpty(_settings.CustomVersionReply)
                             ? $"jclient irc by j0ker {VersionString}"
                             : _settings.CustomVersionReply;
-                        _ = _irc?.SendRawAsync($"NOTICE {nick} :\x01VERSION {reply}\x01");
+                        _ = _irc?.SendRawAsync($"NOTICE {nick} :\u0001VERSION {reply}\u0001");
                         AppendLine(displayTarget, $"*** CTCP VERSION request from {nick}", Color.DimGray);
                     }
                     else if (verb == "PING")
                     {
                         // Echo the payload verbatim so the requester can time the round trip
-                        _ = _irc?.SendRawAsync($"NOTICE {nick} :\x01{ctcp}\x01");
+                        _ = _irc?.SendRawAsync($"NOTICE {nick} :\u0001{ctcp}\u0001");
                         AppendLine(displayTarget, $"*** CTCP PING request from {nick}", Color.DimGray);
                     }
                     else if (verb == "TIME")
                     {
-                        _ = _irc?.SendRawAsync($"NOTICE {nick} :\x01TIME {DateTime.Now:ddd MMM dd HH:mm:ss yyyy}\x01");
+                        _ = _irc?.SendRawAsync($"NOTICE {nick} :\u0001TIME {DateTime.Now:ddd MMM dd HH:mm:ss yyyy}\u0001");
                         AppendLine(displayTarget, $"*** CTCP TIME request from {nick}", Color.DimGray);
                     }
                     else
@@ -1714,7 +1714,7 @@ public partial class MainForm : Form
                 // CTCP ACTION — RFC 1459 CTCP extension
                 if (_currentTarget is not "(server)" and not "")
                 {
-                    var action = $"\x01ACTION {rest}\x01";
+                    var action = $"\u0001ACTION {rest}\u0001";
                     await _irc.PrivMsgAsync(_currentTarget, action);
                     AppendLine(_currentTarget, $"* {DisplayNick(_currentTarget, _irc.CurrentNick ?? "")} {rest}", Color.Plum);
                 }
