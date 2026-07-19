@@ -1731,6 +1731,9 @@ public partial class MainForm : Form
     protected override void OnShown(EventArgs e)
     {
         base.OnShown(e);
+        // Rest the caret on the input line (the server tab is active at startup)
+        // so the user can type straight away without clicking into the box first.
+        _inputBox.Focus();
         if (!_settings.ConnectOnStartup || _savedConnections.Count == 0) return;
 
         var c = _savedConnections.FirstOrDefault(x => x.Name == _settings.LastConnectionName)
