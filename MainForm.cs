@@ -31,6 +31,11 @@ public partial class MainForm : Form
     // quit/nick messages to the right channels and to prefix speakers' nicks.
     private readonly Dictionary<string, Dictionary<string, string>> _channelUsers = new(StringComparer.OrdinalIgnoreCase);
 
+    // Channels whose creation time has already been announced. The server sends
+    // 329 alongside every 324, and we query modes again after each mode change,
+    // so without this the same line would repeat all session.
+    private readonly HashSet<string> _creationShown = new(StringComparer.OrdinalIgnoreCase);
+
     // Input command history, browsed with Up/Down. _historyIndex ==
     // _inputHistory.Count means "past the newest entry" (the live draft).
     private readonly List<string> _inputHistory = [];
@@ -164,6 +169,7 @@ public partial class MainForm : Form
         _topics.Clear();
         _channelUsers.Clear();
         _channelModes.Clear();
+        _creationShown.Clear();
         _currentTarget = "(server)";
         if (_channels.TryGetValue("(server)", out var srv))
             _tabs.SelectedTab = srv.tab;
@@ -654,6 +660,7 @@ public partial class MainForm : Form
         _topics.Remove(name);
         _channelUsers.Remove(name);
         _channelModes.Remove(name);
+        _creationShown.Remove(name);
         _tabs.TabPages.Remove(ch.tab);
 
         if (_currentTarget.Equals(name, StringComparison.OrdinalIgnoreCase))
@@ -1635,6 +1642,7 @@ public partial class MainForm : Form
                     _topics.Remove(channel);
                     _channelUsers.Remove(channel);
                     _channelModes.Remove(channel);
+                    _creationShown.Remove(channel);
                     _tabs.TabPages.Remove(ch.tab);
                     if (_currentTarget.Equals(channel, StringComparison.OrdinalIgnoreCase))
                     {
@@ -1732,6 +1740,18 @@ public partial class MainForm : Form
                     AppendLine(channel, $"*** Topic: {topic}", Color.DimGray);
                     UpdateAllHeaders();
                 }
+                break;
+            }
+
+            case "329": // RPL_CREATIONTIME — "<me> <channel> <unix seconds>"
+            {
+                var channel = msg.Params.Length > 1 ? msg.Params[1] : "";
+                if (channel.Length == 0) break;
+                if (!long.TryParse(msg.Params.LastOrDefault(), out var epoch)) break;
+                // Only worth saying once; it arrives with every mode query.
+                if (!_creationShown.Add(channel)) break;
+                var created = DateTimeOffset.FromUnixTimeSeconds(epoch).ToLocalTime();
+                AppendLine(channel, $"*** Channel created {created:yyyy-MM-dd HH:mm:ss}", Color.DimGray);
                 break;
             }
 
