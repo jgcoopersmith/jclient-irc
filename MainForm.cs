@@ -455,7 +455,16 @@ public partial class MainForm : Form
                 if (_unreadTabs.Remove(_currentTarget))
                     _tabs.Invalidate();
             }
+            // Switching windows leaves focus on the tab strip; put the caret
+            // back where the user actually types. Deferred, because the tab
+            // control claims focus itself after this event returns.
+            BeginInvoke(() => _inputBox.Focus());
         };
+
+        // Clicking the already-active tab raises no Selected event, so the tab
+        // strip would keep focus. Nothing here is keyboard-navigable, so bounce
+        // focus back to the input line whenever the strip receives it.
+        _tabs.GotFocus += (s, e) => BeginInvoke(() => _inputBox.Focus());
 
         // Owner-draw the tab headers so tabs with unread activity and tabs
         // Ctrl+selected for stacking can be highlighted; the default renderer
@@ -1113,6 +1122,7 @@ public partial class MainForm : Form
             if (InSplitMode && _splitChannels.Contains(name, StringComparer.OrdinalIgnoreCase))
                 SetSplitCurrentTarget(name);
         };
+        RouteTypingToInput(log);
         // Per-window header: "<name>     <nick> @ <server>     <topic>"
         var header = new Label
         {
@@ -1130,6 +1140,22 @@ public partial class MainForm : Form
         tab.Controls.Add(header);
         _tabs.TabPages.Add(tab);
         _channels[name] = (tab, header, log);
+    }
+
+    // Log panes are read-only, so typing into one is always meant for the input
+    // line. Hand the keystroke over rather than dropping it. Modifier combos
+    // (Ctrl+C, Ctrl+A) and navigation keys are left alone so the user can still
+    // select and copy text out of the log.
+    private void RouteTypingToInput(RichTextBox log)
+    {
+        log.KeyPress += (s, e) =>
+        {
+            if (char.IsControl(e.KeyChar)) return;
+            if ((ModifierKeys & (Keys.Control | Keys.Alt)) != 0) return;
+            _inputBox.Focus();
+            _inputBox.AppendText(e.KeyChar.ToString());
+            e.Handled = true;
+        };
     }
 
     private string ComposeHeader(string name)
