@@ -12,6 +12,10 @@ public class AliasEditForm : Form
     private readonly TextBox _text = new()
     {
         Multiline = true,
+        // Without this, Enter in a multiline TextBox activates the Form's
+        // AcceptButton (submitting the dialog) instead of inserting a newline —
+        // meaning only one line could ever be typed before OK fired.
+        AcceptsReturn = true,
         ScrollBars = ScrollBars.Both,
         WordWrap = false,
         AcceptsTab = true,
