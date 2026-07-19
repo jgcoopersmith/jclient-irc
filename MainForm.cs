@@ -1743,6 +1743,19 @@ public partial class MainForm : Form
                 break;
             }
 
+            // RPL_TOPICWHOTIME — "<me> <channel> <setter> <unix seconds>", sent
+            // with the topic on join. The setter may be a full nick!user@host.
+            case "333":
+            {
+                var channel = msg.Params.Length > 1 ? msg.Params[1] : "";
+                if (channel.Length == 0 || msg.Params.Length < 4) break;
+                if (!long.TryParse(msg.Params[3], out var setAt)) break;
+                var setter = msg.Params[2].Split('!')[0];
+                var when = DateTimeOffset.FromUnixTimeSeconds(setAt).ToLocalTime();
+                AppendLine(channel, $"*** Topic set by {setter}, {when:yyyy-MM-dd HH:mm:ss}", Color.DimGray);
+                break;
+            }
+
             case "329": // RPL_CREATIONTIME — "<me> <channel> <unix seconds>"
             {
                 var channel = msg.Params.Length > 1 ? msg.Params[1] : "";
