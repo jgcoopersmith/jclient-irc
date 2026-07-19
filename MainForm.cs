@@ -10,8 +10,10 @@ public partial class MainForm : Form
     private bool _explicitQuit; // user issued /quit; window close must not send another QUIT
     private bool _closing;      // form is shutting down; ignore late connection events
 
-    // Channel tabs: channel name -> (TabPage, header label, RichTextBox)
-    private readonly Dictionary<string, (TabPage tab, Label header, RichTextBox log)> _channels = new(StringComparer.OrdinalIgnoreCase);
+    // Channel tabs: channel name -> (TabPage, header label, RichTextBox, nick
+    // list, body). "body" wraps the log, its splitter and the nick list so the
+    // three travel together when a window is moved into a split pane.
+    private readonly Dictionary<string, (TabPage tab, Label header, RichTextBox log, ListBox nicks, Panel body)> _channels = new(StringComparer.OrdinalIgnoreCase);
     private string _currentTarget = "";
 
     // Channel topics (from 332 on join and TOPIC changes) and the server we're
@@ -716,9 +718,11 @@ public partial class MainForm : Form
                 ContextMenuStrip = _splitMenu
             };
             var pane = new Panel { Dock = DockStyle.Fill, Margin = new Padding(LogicalToDeviceUnits(1)), ContextMenuStrip = _splitMenu };
-            log.Parent?.Controls.Remove(log);
+            // Move the whole body so the nick list follows its log into the pane
+            var body = _channels[name].body;
+            body.Parent?.Controls.Remove(body);
             log.ContextMenuStrip = _splitMenu;
-            pane.Controls.Add(log);
+            pane.Controls.Add(body);
             pane.Controls.Add(header);
             _splitPanes.Add(pane);
             _splitHeaders[name] = header;
@@ -773,9 +777,12 @@ public partial class MainForm : Form
         foreach (var name in _splitChannels)
         {
             if (!_channels.TryGetValue(name, out var ch)) continue;
-            ch.log.Parent?.Controls.Remove(ch.log);
+            ch.body.Parent?.Controls.Remove(ch.body);
             ch.log.ContextMenuStrip = null;
-            ch.tab.Controls.Add(ch.log);
+            ch.tab.Controls.Add(ch.body);
+            // The header must dock before the body claims the remaining space,
+            // and docking runs from the highest child index down.
+            ch.tab.Controls.SetChildIndex(ch.body, 0);
         }
         _splitPanel.Controls.Clear();
         foreach (var pane in _splitPanes)
@@ -1135,11 +1142,71 @@ public partial class MainForm : Form
             Padding = new Padding(LogicalToDeviceUnits(4), 0, 0, 0),
             AutoEllipsis = true
         };
+        // Side list of everyone in the channel. The "(server)" window has no
+        // membership, so it gets no list.
+        var nicks = new ListBox
+        {
+            Dock = DockStyle.Right,
+            Width = LogicalToDeviceUnits(150),
+            BackColor = Color.FromArgb(28, 28, 40),
+            ForeColor = Color.LightGray,
+            Font = LogFontFor(name),
+            BorderStyle = BorderStyle.None,
+            IntegralHeight = false,
+            Visible = IsChannel(name)
+        };
+        var nickSplit = new Splitter
+        {
+            Dock = DockStyle.Right,
+            Width = LogicalToDeviceUnits(4),
+            BackColor = Color.FromArgb(45, 45, 60),
+            MinExtra = LogicalToDeviceUnits(120),
+            MinSize = LogicalToDeviceUnits(80),
+            Visible = IsChannel(name)
+        };
+        // Docking is applied in reverse z-order, so the log must be added first
+        // to end up filling whatever the list and splitter leave behind.
+        var body = new Panel { Dock = DockStyle.Fill };
+        body.Controls.Add(log);
+        body.Controls.Add(nickSplit);
+        body.Controls.Add(nicks);
+
         var tab = new TabPage(name);
-        tab.Controls.Add(log);
+        tab.Controls.Add(body);
         tab.Controls.Add(header);
         _tabs.TabPages.Add(tab);
-        _channels[name] = (tab, header, log);
+        _channels[name] = (tab, header, log, nicks, body);
+        RefreshNickList(name);
+    }
+
+    private static bool IsChannel(string name) => name.StartsWith('#') || name.StartsWith('&');
+
+    // Rebuilds a channel's side list: ops first, then voiced, then everyone
+    // else, alphabetical within each group.
+    private void RefreshNickList(string channel)
+    {
+        if (!_channels.TryGetValue(channel, out var ch) || !IsChannel(channel)) return;
+        var users = _channelUsers.TryGetValue(channel, out var u) ? u : [];
+        var ordered = users
+            .OrderBy(kv => kv.Value.Contains('o') ? 0 : kv.Value.Contains('v') ? 1 : 2)
+            .ThenBy(kv => kv.Key, StringComparer.OrdinalIgnoreCase)
+            .Select(kv => (kv.Value.Contains('o') ? "@" : kv.Value.Contains('v') ? "+" : "") + kv.Key)
+            .ToArray();
+
+        // Preserve the selection and scroll position across the rebuild, which
+        // runs on every join/part/mode change.
+        var selected = ch.nicks.SelectedItem as string;
+        int top = ch.nicks.TopIndex;
+        ch.nicks.BeginUpdate();
+        ch.nicks.Items.Clear();
+        ch.nicks.Items.AddRange(ordered);
+        if (selected != null)
+        {
+            int i = Array.IndexOf(ordered, selected);
+            if (i >= 0) ch.nicks.SelectedIndex = i;
+        }
+        if (top > 0 && top < ch.nicks.Items.Count) ch.nicks.TopIndex = top;
+        ch.nicks.EndUpdate();
     }
 
     // Log panes are read-only, so typing into one is always meant for the input
@@ -1438,6 +1505,7 @@ public partial class MainForm : Form
                     _ = _irc?.SendRawAsync($"MODE {channel}");
                 }
                 UsersOf(channel)[nick] = "";
+                RefreshNickList(channel);
                 // Deliberately no _tabs.SelectedTab change here: tabs only switch
                 // when the user clicks one. The unread highlight marks the new tab.
                 AppendLine(channel, $"*** {nick} joined {channel}", Color.LightBlue);
@@ -1451,6 +1519,7 @@ public partial class MainForm : Form
                 var reason = msg.Params.Length > 1 ? msg.Params[1] : "";
                 AppendLine(channel, $"*** {nick} left {channel} ({reason})", Color.LightSalmon);
                 UsersOf(channel).Remove(nick);
+                RefreshNickList(channel);
                 // If it's us parting and the tab is still open (e.g. via /part command), close it
                 if (nick.Equals(_irc?.CurrentNick, StringComparison.OrdinalIgnoreCase)
                     && _channels.TryGetValue(channel, out var ch))
@@ -1480,7 +1549,10 @@ public partial class MainForm : Form
                 // Only the channels the quitter was actually in see the message
                 foreach (var (channel, users) in _channelUsers)
                     if (users.Remove(nick) && _channels.ContainsKey(channel))
+                    {
                         AppendLine(channel, $"*** {nick} quit ({reason})", Color.DimGray);
+                        RefreshNickList(channel);
+                    }
                 break;
             }
 
@@ -1493,6 +1565,7 @@ public partial class MainForm : Form
                     if (!users.TryGetValue(oldNick, out var flags)) continue;
                     users.Remove(oldNick);
                     users[newNick] = flags; // op/voice status follows the rename
+                    RefreshNickList(channel);
                     if (_channels.ContainsKey(channel))
                         AppendLine(channel, $"*** {oldNick} is now {newNick}", Color.Plum);
                 }
@@ -1511,6 +1584,7 @@ public partial class MainForm : Form
                         var (nick, flags) = ParseNamesEntry(n);
                         if (nick.Length > 0) UsersOf(channel)[nick] = flags;
                     }
+                    RefreshNickList(channel);
                 }
                 AppendLine(channel, $"*** Users: {names}", Color.DimGray);
                 break;
@@ -1535,6 +1609,7 @@ public partial class MainForm : Form
                     if (m == 'o') SetUserFlag(users, arg, 'o', adding);
                     else if (m == 'v') SetUserFlag(users, arg, 'v', adding);
                 }
+                RefreshNickList(target);
                 AppendLine(target, $"*** {msg.PrefixNick ?? msg.Prefix ?? "server"} sets mode {string.Join(" ", msg.Params.Skip(1))}", Color.LightBlue);
                 // Re-query rather than replaying mode arithmetic locally: the 324
                 // reply is authoritative and refreshes the header's mode display.
@@ -1613,6 +1688,7 @@ public partial class MainForm : Form
                 var reason = msg.Params.Length > 2 ? msg.Params[2] : "";
                 AppendLine(channel, $"*** {msg.PrefixNick} kicked {kicked} ({reason})", Color.OrangeRed);
                 UsersOf(channel).Remove(kicked);
+                RefreshNickList(channel);
                 break;
             }
 
