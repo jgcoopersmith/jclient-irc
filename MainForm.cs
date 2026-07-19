@@ -919,7 +919,10 @@ public partial class MainForm : Form
         _inputBox.Font = _settings.DefaultFontEnabled && CurrentDefaultFont() is { } d ? d : new Font("Consolas", 10);
         if (_libraryHeader != null) _libraryHeader.Font = new Font(effective, FontStyle.Bold);
         foreach (var (name, ch) in _channels)
+        {
             ch.log.Font = LogFontFor(name);
+            ch.nicks.Font = LogFontFor(name); // the nick list tracks its own log
+        }
         UpdateAllHeaders();
     }
 
