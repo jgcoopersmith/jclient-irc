@@ -1192,9 +1192,16 @@ public partial class MainForm : Form
         var menu = new ContextMenuStrip();
         var opItem = new ToolStripMenuItem("Op", null, (s, e) => ModeSelected(channel, 'o', true));
         var deopItem = new ToolStripMenuItem("Deop", null, (s, e) => ModeSelected(channel, 'o', false));
+        var voiceItem = new ToolStripMenuItem("Voice", null, (s, e) => ModeSelected(channel, 'v', true));
+        var devoiceItem = new ToolStripMenuItem("Devoice", null, (s, e) => ModeSelected(channel, 'v', false));
+        var whoisItem = new ToolStripMenuItem("Whois", null, (s, e) => WhoisSelected(channel));
         var kickItem = new ToolStripMenuItem("Kick", null, (s, e) => KickSelected(channel));
         menu.Items.Add(opItem);
         menu.Items.Add(deopItem);
+        menu.Items.Add(voiceItem);
+        menu.Items.Add(devoiceItem);
+        menu.Items.Add(new ToolStripSeparator());
+        menu.Items.Add(whoisItem);
         menu.Items.Add(new ToolStripSeparator());
         menu.Items.Add(kickItem);
 
@@ -1207,6 +1214,9 @@ public partial class MainForm : Form
             var suffix = n == 1 ? $" {SelectedNicks(channel)[0]}" : $" {n} nicks";
             opItem.Text = "Op" + suffix;
             deopItem.Text = "Deop" + suffix;
+            voiceItem.Text = "Voice" + suffix;
+            devoiceItem.Text = "Devoice" + suffix;
+            whoisItem.Text = "Whois" + suffix;
             kickItem.Text = "Kick" + suffix;
         };
 
@@ -1249,6 +1259,14 @@ public partial class MainForm : Form
             var flags = (adding ? "+" : "-") + new string(mode, batch.Length);
             _ = _irc?.SendRawAsync($"MODE {channel} {flags} {string.Join(' ', batch)}");
         }
+    }
+
+    // WHOIS takes a single nick per command on most servers, so ask one at a
+    // time. Replies land in the server window, same as the /whois command.
+    private void WhoisSelected(string channel)
+    {
+        foreach (var t in SelectedNicks(channel))
+            _ = _irc?.SendRawAsync($"WHOIS {t}");
     }
 
     private void KickSelected(string channel)
