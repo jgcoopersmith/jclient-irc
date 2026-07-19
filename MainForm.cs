@@ -1156,8 +1156,10 @@ public partial class MainForm : Form
             Font = LogFontFor(name),
             BorderStyle = BorderStyle.None,
             IntegralHeight = false,
+            SelectionMode = SelectionMode.MultiExtended,
             Visible = IsChannel(name)
         };
+        BuildNickMenu(name, nicks);
         var nickSplit = new Splitter
         {
             Dock = DockStyle.Right,
@@ -1184,6 +1186,85 @@ public partial class MainForm : Form
 
     private static bool IsChannel(string name) => name.StartsWith('#') || name.StartsWith('&');
 
+    // Right-click menu over a channel's nick list, acting on every selected nick.
+    private void BuildNickMenu(string channel, ListBox nicks)
+    {
+        var menu = new ContextMenuStrip();
+        var opItem = new ToolStripMenuItem("Op", null, (s, e) => ModeSelected(channel, 'o', true));
+        var deopItem = new ToolStripMenuItem("Deop", null, (s, e) => ModeSelected(channel, 'o', false));
+        var kickItem = new ToolStripMenuItem("Kick", null, (s, e) => KickSelected(channel));
+        menu.Items.Add(opItem);
+        menu.Items.Add(deopItem);
+        menu.Items.Add(new ToolStripSeparator());
+        menu.Items.Add(kickItem);
+
+        // A right-click outside any row has nothing to act on; otherwise label
+        // the items with what they are about to affect.
+        menu.Opening += (s, e) =>
+        {
+            int n = nicks.SelectedItems.Count;
+            if (n == 0) { e.Cancel = true; return; }
+            var suffix = n == 1 ? $" {SelectedNicks(channel)[0]}" : $" {n} nicks";
+            opItem.Text = "Op" + suffix;
+            deopItem.Text = "Deop" + suffix;
+            kickItem.Text = "Kick" + suffix;
+        };
+
+        // ListBox does not move the selection on a right-click, so do it here:
+        // clicking inside an existing multi-selection keeps it, clicking a row
+        // outside it selects just that row.
+        nicks.MouseDown += (s, e) =>
+        {
+            if (e.Button != MouseButtons.Right) return;
+            int i = nicks.IndexFromPoint(e.Location);
+            if (i < 0) { nicks.ClearSelected(); return; }
+            if (!nicks.SelectedIndices.Contains(i))
+            {
+                nicks.ClearSelected();
+                nicks.SetSelected(i, true);
+            }
+        };
+        nicks.ContextMenuStrip = menu;
+    }
+
+    // Selected nicks with their @ / + status prefix stripped back off
+    private List<string> SelectedNicks(string channel) =>
+        _channels.TryGetValue(channel, out var ch)
+            ? ch.nicks.SelectedItems.Cast<string>()
+                  .Select(s => s.TrimStart('@', '+'))
+                  .Where(s => s.Length > 0)
+                  .ToList()
+            : [];
+
+    private void ModeSelected(string channel, char mode, bool adding)
+    {
+        var targets = SelectedNicks(channel);
+        if (targets.Count == 0) return;
+        // Servers cap how many mode changes one MODE command may carry (the
+        // MODES token in 005; 4 is the common floor), so send them in batches.
+        const int perCommand = 4;
+        for (int i = 0; i < targets.Count; i += perCommand)
+        {
+            var batch = targets.Skip(i).Take(perCommand).ToArray();
+            var flags = (adding ? "+" : "-") + new string(mode, batch.Length);
+            _ = _irc?.SendRawAsync($"MODE {channel} {flags} {string.Join(' ', batch)}");
+        }
+    }
+
+    private void KickSelected(string channel)
+    {
+        var targets = SelectedNicks(channel);
+        if (targets.Count == 0) return;
+        // Kicking several people at once is easy to trigger by accident from a
+        // stray drag-selection, so confirm anything beyond a single nick.
+        if (targets.Count > 1 &&
+            MessageBox.Show(this, $"Kick these {targets.Count} users from {channel}?\n\n{string.Join(", ", targets)}",
+                "Confirm kick", MessageBoxButtons.YesNo, MessageBoxIcon.Warning) != DialogResult.Yes)
+            return;
+        foreach (var t in targets)
+            _ = _irc?.SendRawAsync($"KICK {channel} {t} :{_irc?.CurrentNick}");
+    }
+
     // Rebuilds a channel's side list: ops first, then voiced, then everyone
     // else, alphabetical within each group.
     private void RefreshNickList(string channel)
@@ -1197,17 +1278,20 @@ public partial class MainForm : Form
             .ToArray();
 
         // Preserve the selection and scroll position across the rebuild, which
-        // runs on every join/part/mode change.
-        var selected = ch.nicks.SelectedItem as string;
+        // runs on every join/part/mode change. Selection is tracked by bare
+        // nick, so someone being opped mid-selection stays selected even though
+        // their "@" prefix just changed.
+        var selected = ch.nicks.SelectedItems.Cast<string>()
+            .Select(s => s.TrimStart('@', '+'))
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
         int top = ch.nicks.TopIndex;
         ch.nicks.BeginUpdate();
         ch.nicks.Items.Clear();
         ch.nicks.Items.AddRange(ordered);
-        if (selected != null)
-        {
-            int i = Array.IndexOf(ordered, selected);
-            if (i >= 0) ch.nicks.SelectedIndex = i;
-        }
+        if (selected.Count > 0)
+            for (int i = 0; i < ordered.Length; i++)
+                if (selected.Contains(ordered[i].TrimStart('@', '+')))
+                    ch.nicks.SetSelected(i, true);
         if (top > 0 && top < ch.nicks.Items.Count) ch.nicks.TopIndex = top;
         ch.nicks.EndUpdate();
     }
