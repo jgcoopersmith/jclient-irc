@@ -1646,7 +1646,7 @@ public partial class MainForm : Form
                     else if (verb == "VERSION")
                     {
                         var reply = string.IsNullOrEmpty(_settings.CustomVersionReply)
-                            ? $"jclient irc by j0ker {VersionString}"
+                            ? $"jclient IRC by j0ker {VersionString}"
                             : _settings.CustomVersionReply;
                         _ = _irc?.SendRawAsync($"NOTICE {nick} :\u0001VERSION {reply}\u0001");
                         AppendLine(displayTarget, $"*** CTCP VERSION request from {nick}", Color.DimGray);
