@@ -1167,6 +1167,12 @@ public partial class MainForm : Form
             Visible = IsChannel(name)
         };
         BuildNickMenu(name, nicks);
+        // Double-clicking someone in the list opens a private chat with them
+        nicks.MouseDoubleClick += (s, e) =>
+        {
+            int i = nicks.IndexFromPoint(e.Location);
+            if (i >= 0) OpenPrivateChat(((string)nicks.Items[i]!).TrimStart('@', '+'));
+        };
         var nickSplit = new Splitter
         {
             Dock = DockStyle.Right,
@@ -1202,6 +1208,9 @@ public partial class MainForm : Form
         var voiceItem = new ToolStripMenuItem("Voice", null, (s, e) => ModeSelected(channel, 'v', true));
         var devoiceItem = new ToolStripMenuItem("Devoice", null, (s, e) => ModeSelected(channel, 'v', false));
         var whoisItem = new ToolStripMenuItem("Whois", null, (s, e) => WhoisSelected(channel));
+        var pingItem = new ToolStripMenuItem("CTCP Ping", null, (s, e) => CtcpSelected(channel, "PING"));
+        var versionItem = new ToolStripMenuItem("CTCP Version", null, (s, e) => CtcpSelected(channel, "VERSION"));
+        var timeItem = new ToolStripMenuItem("CTCP Time", null, (s, e) => CtcpSelected(channel, "TIME"));
         var kickItem = new ToolStripMenuItem("Kick", null, (s, e) => KickSelected(channel));
         menu.Items.Add(opItem);
         menu.Items.Add(deopItem);
@@ -1209,6 +1218,9 @@ public partial class MainForm : Form
         menu.Items.Add(devoiceItem);
         menu.Items.Add(new ToolStripSeparator());
         menu.Items.Add(whoisItem);
+        menu.Items.Add(pingItem);
+        menu.Items.Add(versionItem);
+        menu.Items.Add(timeItem);
         menu.Items.Add(new ToolStripSeparator());
         menu.Items.Add(kickItem);
 
@@ -1224,6 +1236,9 @@ public partial class MainForm : Form
             voiceItem.Text = "Voice" + suffix;
             devoiceItem.Text = "Devoice" + suffix;
             whoisItem.Text = "Whois" + suffix;
+            pingItem.Text = "CTCP Ping" + suffix;
+            versionItem.Text = "CTCP Version" + suffix;
+            timeItem.Text = "CTCP Time" + suffix;
             kickItem.Text = "Kick" + suffix;
         };
 
@@ -1268,6 +1283,25 @@ public partial class MainForm : Form
         }
     }
 
+    // The CTCP delimiter (SOH). Named rather than escaped inline so the format
+    // strings below stay readable.
+    private const char CtcpMark = (char)1;
+
+    // CTCP query to every selected nick. PING carries a millisecond timestamp so
+    // the reply can be turned back into a round-trip time.
+    private void CtcpSelected(string channel, string verb)
+    {
+        foreach (var t in SelectedNicks(channel))
+        {
+            var body = verb == "PING"
+                ? $"PING {DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()}"
+                : verb;
+            // CTCP is a PRIVMSG whose text is wrapped in the CTCP delimiter
+            _ = _irc?.SendRawAsync($"PRIVMSG {t} :{CtcpMark}{body}{CtcpMark}");
+            AppendLine(channel, $"*** CTCP {verb} to {t}", Color.DimGray);
+        }
+    }
+
     // WHOIS takes a single nick per command on most servers, so ask one at a
     // time. Replies land in the server window, same as the /whois command.
     private void WhoisSelected(string channel)
@@ -1288,6 +1322,20 @@ public partial class MainForm : Form
             return;
         foreach (var t in targets)
             _ = _irc?.SendRawAsync($"KICK {channel} {t} :{_irc?.CurrentNick}");
+    }
+
+    // Opens (or switches to) a private chat window with the given nick — the
+    // same tab a PM from them would land in. Talking to yourself is a no-op.
+    private void OpenPrivateChat(string nick)
+    {
+        if (nick.Length == 0 || nick.Equals(_irc?.CurrentNick, StringComparison.OrdinalIgnoreCase))
+            return;
+        if (!_channels.ContainsKey(nick))
+            AddChannelTab(nick);
+        // The tab strip is hidden while panes are stacked; the window exists
+        // and will be there (with any replies) when the user leaves the split.
+        if (!InSplitMode)
+            _tabs.SelectedTab = _channels[nick].tab;
     }
 
     // Rebuilds a channel's side list: ops first, then voiced, then everyone
@@ -1815,6 +1863,24 @@ public partial class MainForm : Form
             {
                 var text = msg.Params.LastOrDefault() ?? "";
                 var nick = msg.PrefixNick ?? msg.Prefix ?? "server";
+                // A CTCP reply comes back as a NOTICE wrapped in the delimiter.
+                // Decode it rather than printing the control characters raw.
+                if (text.Length >= 2 && text[0] == CtcpMark && text[^1] == CtcpMark)
+                {
+                    var body = text.Trim(CtcpMark);
+                    var verb = body.Split(' ', 2)[0].ToUpperInvariant();
+                    var arg = body.Length > verb.Length ? body[(verb.Length + 1)..] : "";
+                    var line = verb switch
+                    {
+                        // PING echoes the timestamp we sent, so it becomes a round trip
+                        "PING" when long.TryParse(arg, out var sent) =>
+                            $"*** CTCP PING reply from {nick}: {(DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() - sent) / 1000.0:0.00}s",
+                        "PING" => $"*** CTCP PING reply from {nick}",
+                        _ => $"*** CTCP {verb} reply from {nick}: {arg}"
+                    };
+                    AppendLine(_currentTarget, line, Color.DimGray);
+                    break;
+                }
                 AppendLine("(server)", $"-{nick}- {text}", Color.Gold);
                 break;
             }
@@ -1961,6 +2027,12 @@ public partial class MainForm : Form
                 break;
             case "RAW":
                 await _irc.SendRawAsync(rest);
+                break;
+            // Wipes the active window's scrollback only; nothing is sent and no
+            // other window is touched.
+            case "CLEAR":
+                if (_channels.TryGetValue(_currentTarget, out var clearTarget))
+                    clearTarget.log.Clear();
                 break;
             default:
                 await _irc.SendRawAsync(cmd);
