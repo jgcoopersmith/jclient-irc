@@ -342,9 +342,33 @@ public partial class MainForm : Form
             SettingsStore.Save(_settings);
             logToggleItem.Text = LogToggleText();
         };
+        // Opens the configured log directory in File Explorer. Disabled until a
+        // folder is set, since there is nothing to open otherwise.
+        var openLogDirItem = new ToolStripMenuItem("Open Log Folder in Explorer");
+        openLogDirItem.Click += (s, e) =>
+        {
+            var dir = _settings.LogDirectory;
+            if (string.IsNullOrEmpty(dir)) return;
+            try
+            {
+                Directory.CreateDirectory(dir); // may not exist yet if nothing has logged
+                System.Diagnostics.Process.Start(
+                    new System.Diagnostics.ProcessStartInfo("explorer.exe", $"\"{dir}\"") { UseShellExecute = true });
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show(this, $"Couldn't open the log folder:\n{ex.Message}",
+                    "Open Log Folder", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            }
+        };
         logOptions.DropDownItems.Add(setLogDirItem);
         logOptions.DropDownItems.Add(new ToolStripSeparator());
         logOptions.DropDownItems.Add(logToggleItem);
+        logOptions.DropDownItems.Add(new ToolStripSeparator());
+        logOptions.DropDownItems.Add(openLogDirItem);
+        // Grey the item out whenever the submenu opens with no folder configured
+        logOptions.DropDownOpening += (s, e) =>
+            openLogDirItem.Enabled = !string.IsNullOrEmpty(_settings.LogDirectory);
         optionsItem.DropDownItems.Add(logOptions);
         var aboutItem = new ToolStripMenuItem("About");
         // Disabled info items carry gray text by default; ForeColor forces black
