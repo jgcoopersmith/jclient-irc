@@ -21,6 +21,25 @@ public partial class MainForm : Form
     private readonly Dictionary<string, string> _topics = new(StringComparer.OrdinalIgnoreCase);
     private string? _activeServer;
 
+    // The window a query command (/who, /whois, /list, /raw, ...) was typed in.
+    // Server replies to it are printed there instead of the server tab, and are
+    // cleared once the reply's end-of-list numeric arrives so later unsolicited
+    // numerics fall back to "(server)".
+    private string? _replyTarget;
+
+    // Numerics that terminate a query reply: ENDOFWHO/WHOIS/WHOWAS, LISTEND,
+    // ENDOFSTATS/NAMES/LINKS/BANLIST/INFO/MOTD/USERS.
+    private static readonly HashSet<string> ReplyEndNumerics =
+        ["315", "318", "323", "369", "219", "366", "365", "368", "374", "376", "394"];
+
+    // Commands whose replies belong in the window they were sent from.
+    private static readonly HashSet<string> QueryCommands =
+        [
+            "WHO", "WHOIS", "WHOWAS", "LIST", "NAMES", "LINKS", "STATS", "MAP",
+            "MOTD", "LUSERS", "VERSION", "TIME", "ADMIN", "INFO", "TRACE",
+            "USERHOST", "ISON", "RAW", "QUOTE"
+        ];
+
     // Channel modes (e.g. "+tn", plus key/limit args), from 324 replies to the
     // MODE query sent on join and re-queried after any mode change; shown in
     // the window header between server and topic.
@@ -1506,6 +1525,7 @@ public partial class MainForm : Form
             _statusLabel.Text = "Disconnected";
             _disconnectBtn.Enabled = false;
             _activeServer = null;
+            _replyTarget = null;
             UpdateAllHeaders();
             AppendLine("(server)", "*** Disconnected", Color.Orange);
             if (_settings.ReconnectOnDisconnect)
@@ -1558,6 +1578,7 @@ public partial class MainForm : Form
         // current, and _irc is already null by the time its callback runs.
         _statusLabel.Text = "Disconnected";
         _activeServer = null;
+        _replyTarget = null;
         UpdateAllHeaders();
         AppendLine("(server)", "*** Disconnected", Color.Orange);
     }
@@ -1936,9 +1957,18 @@ public partial class MainForm : Form
                 break;
 
             default:
-                // Show numeric replies and unknown commands in server tab
+                // Numeric replies go to the window whose command asked for them
+                // (yellow), or to the server tab when nothing is outstanding.
                 if (int.TryParse(msg.Command, out _))
-                    AppendLine("(server)", $"[{msg.Command}] {string.Join(" ", msg.Params)}", Color.DimGray);
+                {
+                    var line = $"[{msg.Command}] {string.Join(" ", msg.Params)}";
+                    if (_replyTarget != null)
+                    {
+                        AppendLine(_replyTarget, line, Color.Yellow);
+                        if (ReplyEndNumerics.Contains(msg.Command)) _replyTarget = null;
+                    }
+                    else AppendLine("(server)", line, Color.DimGray);
+                }
                 break;
         }
     }
@@ -2003,6 +2033,10 @@ public partial class MainForm : Form
             return;
         }
 
+        // Remember where a query was issued so its replies come back here.
+        if (QueryCommands.Contains(verb))
+            _replyTarget = _currentTarget;
+
         switch (verb)
         {
             case "JOIN":
@@ -2059,6 +2093,9 @@ public partial class MainForm : Form
                     clearTarget.log.Clear();
                 break;
             default:
+                // Unrecognised verbs are passed straight to the server, so their
+                // replies belong in this window too.
+                _replyTarget = _currentTarget;
                 await _irc.SendRawAsync(cmd);
                 break;
         }
