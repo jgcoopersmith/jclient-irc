@@ -653,6 +653,27 @@ public partial class MainForm : Form
             }
         };
 
+        // Tab completes the nick being typed from the current channel's user
+        // list. Tab is a focus-change key, so it has to be claimed in
+        // PreviewKeyDown before KeyDown ever sees it.
+        _inputBox.PreviewKeyDown += (s, e) =>
+        {
+            if (e.KeyCode == Keys.Tab) e.IsInputKey = true;
+        };
+        _inputBox.KeyDown += (s, e) =>
+        {
+            if (e.KeyCode != Keys.Tab || e.Control || e.Alt) return;
+            e.SuppressKeyPress = true;
+            CompleteNick(e.Shift);
+        };
+
+        // Any other edit invalidates an in-progress completion cycle, so the
+        // next Tab starts a fresh search rather than cycling stale matches.
+        _inputBox.TextChanged += (s, e) =>
+        {
+            if (!_completing) _completeMatches.Clear();
+        };
+
         // Right-click context menu on input box (cut/copy/paste/select all)
         var inputMenu = new ContextMenuStrip();
         inputMenu.Items.Add("Cut",    null, (s, e) => _inputBox.Cut());
@@ -1448,6 +1469,61 @@ public partial class MainForm : Form
             ch.header.Text = ComposeHeader(name);
         foreach (var (name, label) in _splitHeaders)
             label.Text = ComposeHeader(name);
+    }
+
+    // --- Tab completion state -------------------------------------------
+    // Matches for the word being completed, the position in that list, and
+    // where the word starts in the input box. _completing guards the
+    // TextChanged handler while we rewrite the box ourselves.
+    private readonly List<string> _completeMatches = [];
+    private int _completeIndex;
+    private int _completeStart;
+    private int _completeLength;
+    private bool _completing;
+
+    // Replaces the partial nick left of the caret with a matching nick from the
+    // channel's user list; pressing Tab again cycles to the next match (Shift+Tab
+    // walks backwards). A completion at the very start of the line gets ", "
+    // appended, mIRC-style, so "j<Tab>" becomes "j0ker, ".
+    private void CompleteNick(bool backwards)
+    {
+        var text = _inputBox.Text;
+        var caret = _inputBox.SelectionStart;
+
+        if (_completeMatches.Count > 0 && caret == _completeStart + _completeLength)
+        {
+            // Continue the current cycle
+            _completeIndex = (_completeIndex + (backwards ? -1 : 1) + _completeMatches.Count) % _completeMatches.Count;
+        }
+        else
+        {
+            int start = caret;
+            while (start > 0 && text[start - 1] != ' ') start--;
+            var partial = text[start..caret];
+            if (partial.Length == 0) return;
+
+            _completeMatches.Clear();
+            _completeMatches.AddRange(
+                UsersOf(_currentTarget).Keys
+                    .Where(n => n.StartsWith(partial, StringComparison.OrdinalIgnoreCase))
+                    .OrderBy(n => n, StringComparer.OrdinalIgnoreCase));
+            if (_completeMatches.Count == 0) return;
+
+            _completeIndex = backwards ? _completeMatches.Count - 1 : 0;
+            _completeStart = start;
+            _completeLength = partial.Length;
+        }
+
+        var nick = _completeMatches[_completeIndex];
+        var replacement = _completeStart == 0 ? $"{nick}, " : nick;
+
+        _completing = true;
+        _inputBox.Text = text[.._completeStart] + replacement + text[(_completeStart + _completeLength)..];
+        _completing = false;
+
+        _completeLength = replacement.Length;
+        _inputBox.SelectionStart = _completeStart + _completeLength;
+        _inputBox.SelectionLength = 0;
     }
 
     private void AppendLine(string target, string text, Color? color = null)
