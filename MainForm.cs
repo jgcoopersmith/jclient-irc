@@ -251,6 +251,11 @@ public partial class MainForm : Form
         MinimumSize = LogicalToDeviceUnits(new Size(600, 400));
         Icon = AppIcon.Get();
 
+        // Typing anywhere in the main window goes to the input line, whichever
+        // control happens to hold focus (a log, the nick list, the connection
+        // list, a button). See OnKeyPress.
+        KeyPreview = true;
+
         _inputPanel.Height = LogicalToDeviceUnits(36);
         _sendBtn.Width = LogicalToDeviceUnits(70);
         _libraryPanel.Width = LogicalToDeviceUnits(220);
@@ -1203,7 +1208,6 @@ public partial class MainForm : Form
             if (InSplitMode && _splitChannels.Contains(name, StringComparer.OrdinalIgnoreCase))
                 SetSplitCurrentTarget(name);
         };
-        RouteTypingToInput(log);
         // Per-window header: "<name>     <nick> @ <server>     <topic>"
         var header = new Label
         {
@@ -1437,16 +1441,23 @@ public partial class MainForm : Form
     // line. Hand the keystroke over rather than dropping it. Modifier combos
     // (Ctrl+C, Ctrl+A) and navigation keys are left alone so the user can still
     // select and copy text out of the log.
-    private void RouteTypingToInput(RichTextBox log)
+    // Keeps typing focus on the input line: a printable character pressed while
+    // any other control has focus moves focus to the input box and lands there
+    // instead of being swallowed (or triggering list type-ahead). Control chars
+    // and Ctrl/Alt combinations pass through untouched so shortcuts, Tab
+    // completion and menu access still work.
+    protected override void OnKeyPress(KeyPressEventArgs e)
     {
-        log.KeyPress += (s, e) =>
+        if (!char.IsControl(e.KeyChar)
+            && (ModifierKeys & (Keys.Control | Keys.Alt)) == 0
+            && !_inputBox.Focused)
         {
-            if (char.IsControl(e.KeyChar)) return;
-            if ((ModifierKeys & (Keys.Control | Keys.Alt)) != 0) return;
             _inputBox.Focus();
             _inputBox.AppendText(e.KeyChar.ToString());
             e.Handled = true;
-        };
+            return;
+        }
+        base.OnKeyPress(e);
     }
 
     private string ComposeHeader(string name)
