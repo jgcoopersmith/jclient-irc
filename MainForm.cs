@@ -1355,12 +1355,17 @@ public partial class MainForm : Form
     // strings below stay readable.
     private const char CtcpMark = (char)1;
 
+    // Where each outstanding CTCP query was sent from, so its reply (which
+    // arrives as a NOTICE, not a numeric) comes back to the same window.
+    private readonly Dictionary<string, string> _ctcpReplyWindows = new(StringComparer.OrdinalIgnoreCase);
+
     // CTCP query to every selected nick. PING carries a millisecond timestamp so
     // the reply can be turned back into a round-trip time.
     private void CtcpSelected(string channel, string verb)
     {
         foreach (var t in SelectedNicks(channel))
         {
+            _ctcpReplyWindows[t] = channel;
             var body = verb == "PING"
                 ? $"PING {DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()}"
                 : verb;
@@ -1371,10 +1376,14 @@ public partial class MainForm : Form
     }
 
     // WHOIS takes a single nick per command on most servers, so ask one at a
-    // time. Replies land in the server window, same as the /whois command.
+    // time. Replies land in the window the menu was opened from, same as a
+    // /whois typed there.
     private void WhoisSelected(string channel)
     {
-        foreach (var t in SelectedNicks(channel))
+        var targets = SelectedNicks(channel);
+        if (targets.Count == 0) return;
+        _replyTarget = channel;
+        foreach (var t in targets)
             _ = _irc?.SendRawAsync($"WHOIS {t}");
     }
 
@@ -2010,7 +2019,12 @@ public partial class MainForm : Form
                         "PING" => $"*** CTCP PING reply from {nick}",
                         _ => $"*** CTCP {verb} reply from {nick}: {arg}"
                     };
-                    AppendLine(_currentTarget, line, Color.DimGray);
+                    // Back to whichever window asked (right-click menu), falling
+                    // back to the active one for replies we didn't initiate.
+                    if (_ctcpReplyWindows.Remove(nick, out var askedFrom))
+                        AppendLine(askedFrom, line, Color.Yellow);
+                    else
+                        AppendLine(_currentTarget, line, Color.DimGray);
                     break;
                 }
                 AppendLine("(server)", $"-{nick}- {text}", Color.Gold);
