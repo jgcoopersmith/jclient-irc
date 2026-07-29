@@ -1760,12 +1760,21 @@ public partial class MainForm : Form
                 var text = msg.Params.Length > 1 ? msg.Params[1] : "";
                 var nick = msg.PrefixNick ?? msg.Prefix ?? "?";
                 var displayTarget = target.StartsWith('#') || target.StartsWith('&') ? target : nick;
+                // Anything aimed at us personally rather than at a channel
+                var toMe = !target.StartsWith('#') && !target.StartsWith('&');
 
-                // CTCP: text wrapped in \u0001. Handle the common queries out of band.
-                if (text.Length >= 2 && text[0] == '\u0001' && text[^1] == '\u0001')
+                // CTCP: text opens with the delimiter. The closing one is optional in
+                // the CTCP spec and some clients omit it (notably on PING), so only
+                // the opening one is required. Common queries are handled out of band.
+                if (text.Length >= 2 && text[0] == CtcpMark)
                 {
                     var ctcp = text.Trim('\u0001');
                     var verb = ctcp.Split(' ', 2)[0].ToUpperInvariant();
+                    if (toMe)
+                        Notify($"CTCP {verb} from {nick}",
+                               verb == "ACTION"
+                                   ? $"* {nick} {(ctcp.Length > 7 ? ctcp[7..] : "")}"
+                                   : $"{nick} sent you a CTCP {verb}");
                     if (verb == "ACTION")
                     {
                         var action = ctcp.Length > 7 ? ctcp[7..] : "";
@@ -1799,6 +1808,7 @@ public partial class MainForm : Form
 
                 // PM to us — show in their nick tab
                 AppendLine(displayTarget, $"<{DisplayNick(displayTarget, nick)}> {text}", Color.White);
+                if (toMe) Notify($"Message from {nick}", text);
                 break;
             }
 
@@ -2015,9 +2025,10 @@ public partial class MainForm : Form
             {
                 var text = msg.Params.LastOrDefault() ?? "";
                 var nick = msg.PrefixNick ?? msg.Prefix ?? "server";
-                // A CTCP reply comes back as a NOTICE wrapped in the delimiter.
-                // Decode it rather than printing the control characters raw.
-                if (text.Length >= 2 && text[0] == CtcpMark && text[^1] == CtcpMark)
+                // A CTCP reply comes back as a NOTICE opening with the delimiter (the
+                // closing one, again, being optional). Decode it rather than printing
+                // the control characters raw.
+                if (text.Length >= 2 && text[0] == CtcpMark)
                 {
                     var body = text.Trim(CtcpMark);
                     var verb = body.Split(' ', 2)[0].ToUpperInvariant();
@@ -2038,6 +2049,15 @@ public partial class MainForm : Form
                         AppendLine(_currentTarget, line, Color.DimGray);
                     break;
                 }
+                // Servers that tell you when you've been whois'd (UnrealIRCd's
+                // +W, InspIRCd's snomask equivalents) do it with a plain NOTICE,
+                // so this is a text match rather than a protocol event — clients
+                // get no numeric of their own when someone looks them up.
+                if (text.Contains("whois", StringComparison.OrdinalIgnoreCase)
+                    && _irc?.CurrentNick is { Length: > 0 } me
+                    && text.Contains(me, StringComparison.OrdinalIgnoreCase))
+                    Notify("Whois", text);
+
                 AppendLine("(server)", $"-{nick}- {text}", Color.Gold);
                 break;
             }
@@ -2232,7 +2252,9 @@ public partial class MainForm : Form
     // Exit quits for real.
     private NotifyIcon? _tray;
 
-    private void HideToTray()
+    // The icon stays visible for the life of the app, not just while hidden,
+    // so it can raise balloon notifications at any time.
+    private NotifyIcon Tray()
     {
         if (_tray == null)
         {
@@ -2244,11 +2266,18 @@ public partial class MainForm : Form
             {
                 Icon = AppIcon.Get(),
                 Text = "jclient irc",
-                ContextMenuStrip = menu
+                ContextMenuStrip = menu,
+                Visible = true
             };
             _tray.DoubleClick += (s, e) => RestoreFromTray();
+            _tray.BalloonTipClicked += (s, e) => RestoreFromTray();
         }
-        _tray.Visible = true;
+        return _tray;
+    }
+
+    private void HideToTray()
+    {
+        Tray();
         Hide();
     }
 
@@ -2257,7 +2286,95 @@ public partial class MainForm : Form
         Show();
         WindowState = FormWindowState.Normal;
         Activate();
-        if (_tray != null) _tray.Visible = false;
+    }
+
+    // The banner currently on screen, if any; a second notification reuses it
+    // rather than stacking windows up the corner of the screen.
+    private Form? _banner;
+    private System.Windows.Forms.Timer? _bannerTimer;
+
+    // Three-second banner in the bottom-right corner, raised only when the
+    // window isn't the one being looked at — hidden to tray, minimised, or
+    // simply not focused. Anything happening in plain sight stays silent.
+    //
+    // Drawn as our own topmost window rather than NotifyIcon.ShowBalloonTip:
+    // balloons are delivered as toasts on Windows 10/11 and get suppressed
+    // outright by focus assist or per-app notification settings.
+    private void Notify(string title, string text)
+    {
+        if (Visible && WindowState != FormWindowState.Minimized && ContainsFocus) return;
+
+        if (_banner == null)
+        {
+            _banner = new BannerForm
+            {
+                FormBorderStyle = FormBorderStyle.None,
+                ShowInTaskbar = false,
+                TopMost = true,
+                StartPosition = FormStartPosition.Manual,
+                BackColor = Color.FromArgb(28, 28, 40),
+                Size = LogicalToDeviceUnits(new Size(320, 80))
+            };
+            var titleLabel = new Label
+            {
+                Dock = DockStyle.Top,
+                Height = LogicalToDeviceUnits(24),
+                ForeColor = Color.Yellow,
+                Font = new Font("Segoe UI", 10, FontStyle.Bold),
+                Padding = new Padding(LogicalToDeviceUnits(8), LogicalToDeviceUnits(4), 0, 0),
+                AutoEllipsis = true
+            };
+            var bodyLabel = new Label
+            {
+                Dock = DockStyle.Fill,
+                ForeColor = Color.White,
+                Padding = new Padding(LogicalToDeviceUnits(8), 0, LogicalToDeviceUnits(8), LogicalToDeviceUnits(4)),
+                AutoEllipsis = true
+            };
+            _banner.Controls.Add(bodyLabel);
+            _banner.Controls.Add(titleLabel);
+            _banner.Tag = (titleLabel, bodyLabel);
+            // Clicking anywhere on the banner brings the client back up
+            void Restore(object? s, EventArgs e) { HideBanner(); RestoreFromTray(); }
+            _banner.Click += Restore;
+            titleLabel.Click += Restore;
+            bodyLabel.Click += Restore;
+        }
+
+        var (t, b) = ((Label, Label))_banner.Tag!;
+        t.Text = title;
+        b.Text = text;
+
+        var area = Screen.PrimaryScreen?.WorkingArea ?? new Rectangle(0, 0, 1024, 768);
+        _banner.Location = new Point(
+            area.Right - _banner.Width - LogicalToDeviceUnits(12),
+            area.Bottom - _banner.Height - LogicalToDeviceUnits(12));
+
+        // BannerForm.ShowWithoutActivation keeps focus in whatever the user is
+        // typing in; the banner only appears, it never steals the keyboard.
+        _banner.Show();
+
+        _bannerTimer ??= new System.Windows.Forms.Timer();
+        _bannerTimer.Stop();
+        _bannerTimer.Interval = 3000;
+        _bannerTimer.Tick -= BannerElapsed;
+        _bannerTimer.Tick += BannerElapsed;
+        _bannerTimer.Start();
+    }
+
+    // A popup that appears without taking focus away from whatever the user
+    // is doing — the whole point of a passive notification.
+    private sealed class BannerForm : Form
+    {
+        protected override bool ShowWithoutActivation => true;
+    }
+
+    private void BannerElapsed(object? sender, EventArgs e) => HideBanner();
+
+    private void HideBanner()
+    {
+        _bannerTimer?.Stop();
+        _banner?.Hide();
     }
 
     // Set by the tray menu's Exit so the close it triggers isn't swallowed
@@ -2299,6 +2416,8 @@ public partial class MainForm : Form
             _tray.Visible = false;
             _tray.Dispose();
         }
+        _bannerTimer?.Dispose();
+        _banner?.Dispose();
         base.OnFormClosed(e);
     }
 }
