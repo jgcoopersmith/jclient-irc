@@ -318,8 +318,19 @@ public partial class MainForm : Form
                 versionReplyItem.Text = VersionReplyText();
             }
         };
+        var minimizeToTrayItem = new ToolStripMenuItem("Keep running when closed (minimize to tray)")
+        {
+            CheckOnClick = true,
+            Checked = _settings.MinimizeToTrayOnClose
+        };
+        minimizeToTrayItem.CheckedChanged += (s, e) =>
+        {
+            _settings.MinimizeToTrayOnClose = minimizeToTrayItem.Checked;
+            SettingsStore.Save(_settings);
+        };
         connectOptions.DropDownItems.Add(connectOnStartupItem);
         connectOptions.DropDownItems.Add(reconnectOnDisconnectItem);
+        connectOptions.DropDownItems.Add(minimizeToTrayItem);
         connectOptions.DropDownItems.Add(new ToolStripSeparator());
         connectOptions.DropDownItems.Add(versionReplyItem);
         optionsItem.DropDownItems.Add(connectOptions);
@@ -2216,8 +2227,56 @@ public partial class MainForm : Form
         ConnectToSelected();
     }
 
+    // Notification-area icon, created on demand the first time the window is
+    // hidden. Double-clicking it (or its Open item) brings the window back;
+    // Exit quits for real.
+    private NotifyIcon? _tray;
+
+    private void HideToTray()
+    {
+        if (_tray == null)
+        {
+            var menu = new ContextMenuStrip();
+            menu.Items.Add("Open", null, (s, e) => RestoreFromTray());
+            menu.Items.Add(new ToolStripSeparator());
+            menu.Items.Add("Exit", null, (s, e) => { _exitFromTray = true; Close(); });
+            _tray = new NotifyIcon
+            {
+                Icon = AppIcon.Get(),
+                Text = "jclient irc",
+                ContextMenuStrip = menu
+            };
+            _tray.DoubleClick += (s, e) => RestoreFromTray();
+        }
+        _tray.Visible = true;
+        Hide();
+    }
+
+    private void RestoreFromTray()
+    {
+        Show();
+        WindowState = FormWindowState.Normal;
+        Activate();
+        if (_tray != null) _tray.Visible = false;
+    }
+
+    // Set by the tray menu's Exit so the close it triggers isn't swallowed
+    // by the minimize-to-tray branch below.
+    private bool _exitFromTray;
+
     protected override void OnFormClosing(FormClosingEventArgs e)
     {
+        // "Keep running when closed": the X button hides the window and leaves
+        // the connection up. Windows shutting down or the tray's own Exit still
+        // close for real.
+        if (_settings.MinimizeToTrayOnClose && !_exitFromTray
+            && e.CloseReason is CloseReason.UserClosing or CloseReason.None)
+        {
+            e.Cancel = true;
+            HideToTray();
+            return;
+        }
+
         _closing = true;
         // Closing the window by any means sends a proper "QUIT :jclient" so the
         // server sees a clean quit rather than a dropped socket — unless the user
@@ -2233,6 +2292,13 @@ public partial class MainForm : Form
     protected override void OnFormClosed(FormClosedEventArgs e)
     {
         _irc?.Dispose();
+        // Without this the icon lingers in the notification area until the
+        // user hovers over it.
+        if (_tray != null)
+        {
+            _tray.Visible = false;
+            _tray.Dispose();
+        }
         base.OnFormClosed(e);
     }
 }

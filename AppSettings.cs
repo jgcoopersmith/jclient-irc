@@ -9,6 +9,10 @@ public class AppSettings
     // first saved connection if this name no longer exists.
     public string LastConnectionName { get; set; } = "";
 
+    // When set, closing the window hides it to the notification area and the
+    // client keeps running (and stays connected) instead of quitting.
+    public bool MinimizeToTrayOnClose { get; set; }
+
     // Catch-all directory for all logging; empty means nothing is written.
     public string LogDirectory { get; set; } = "";
 
