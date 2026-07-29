@@ -1326,6 +1326,12 @@ public partial class MainForm : Form
     // because each channel window builds its own RichTextBox.
     private void WireUrlHandling(RichTextBox log)
     {
+        // RichTextBox auto-links URLs by default and handles the mouse over
+        // them itself, which swallows the double-click and the context menu
+        // exactly where a link is. We do our own thing with links, so turn the
+        // built-in detection off.
+        log.DetectUrls = false;
+
         log.MouseDoubleClick += (s, e) =>
         {
             if (e.Button != MouseButtons.Left) return;
