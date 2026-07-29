@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Drawing;
 using System.Windows.Forms;
 
@@ -495,11 +496,24 @@ public partial class MainForm : Form
 
         MainMenuStrip = _menu;
 
+        // Drag bar between the connection library and the chat area. The nick
+        // list has had one of these on the right since it was added; this gives
+        // the left edge the same treatment.
+        var librarySplit = new Splitter
+        {
+            Dock = DockStyle.Left,
+            Width = LogicalToDeviceUnits(4),
+            BackColor = Color.FromArgb(45, 45, 60),
+            MinExtra = LogicalToDeviceUnits(300),
+            MinSize = LogicalToDeviceUnits(120)
+        };
+
         // Add order matters for docking: controls are docked in reverse of Controls.Add
         // order, so _mainLayout (Fill) is added first to claim whatever space is left
         // after the menu (Top), _libraryPanel (Left), and the status bar have claimed
         // theirs. The menu is added last so it docks first and spans the full width.
         Controls.Add(_mainLayout);
+        Controls.Add(librarySplit);
         Controls.Add(_libraryPanel);
         Controls.Add(_status);
         Controls.Add(_menu);
@@ -865,7 +879,7 @@ public partial class MainForm : Form
         {
             if (!_channels.TryGetValue(name, out var ch)) continue;
             ch.body.Parent?.Controls.Remove(ch.body);
-            ch.log.ContextMenuStrip = null;
+            ch.log.ContextMenuStrip = _logMenus.GetValueOrDefault(ch.log);
             ch.tab.Controls.Add(ch.body);
             // The header must dock before the body claims the remaining space,
             // and docking runs from the highest child index down.
@@ -1245,6 +1259,7 @@ public partial class MainForm : Form
             SelectionMode = SelectionMode.MultiExtended,
             Visible = IsChannel(name)
         };
+        WireUrlHandling(log);
         BuildNickMenu(name, nicks);
         // Double-clicking someone in the list opens a private chat with them
         nicks.MouseDoubleClick += (s, e) =>
@@ -1277,6 +1292,86 @@ public partial class MainForm : Form
     }
 
     private static bool IsChannel(string name) => name.StartsWith('#') || name.StartsWith('&');
+
+    // The URL the log's context menu was opened over, so "Copy Link" knows what
+    // to copy after the click has moved on.
+    private string? _menuUrl;
+
+    // Returns the URL under a point in the log, or null. The token is taken as
+    // the run of non-whitespace around that character, then stripped of the
+    // punctuation people habitually write after a link ("see http://x.com, it's
+    // good") and of a wrapping pair of brackets.
+    private static string? UrlAt(RichTextBox log, Point p)
+    {
+        int i = log.GetCharIndexFromPosition(p);
+        var text = log.Text;
+        if (i < 0 || i >= text.Length || char.IsWhiteSpace(text[i])) return null;
+
+        int start = i, end = i;
+        while (start > 0 && !char.IsWhiteSpace(text[start - 1])) start--;
+        while (end < text.Length - 1 && !char.IsWhiteSpace(text[end + 1])) end++;
+
+        var token = text[start..(end + 1)].Trim('(', ')', '<', '>', '[', ']', '"', '\'');
+        token = token.TrimEnd('.', ',', ';', ':', '!', '?');
+
+        if (!token.StartsWith("http://", StringComparison.OrdinalIgnoreCase)
+            && !token.StartsWith("https://", StringComparison.OrdinalIgnoreCase)
+            && !token.StartsWith("www.", StringComparison.OrdinalIgnoreCase))
+            return null;
+
+        return token.StartsWith("www.", StringComparison.OrdinalIgnoreCase) ? $"http://{token}" : token;
+    }
+
+    // Double-click a link to open it, right-click for Copy Link. Wired per log
+    // because each channel window builds its own RichTextBox.
+    private void WireUrlHandling(RichTextBox log)
+    {
+        log.MouseDoubleClick += (s, e) =>
+        {
+            if (e.Button != MouseButtons.Left) return;
+            if (UrlAt(log, e.Location) is not { } url) return;
+            try
+            {
+                // UseShellExecute hands the URL to whatever the user has set as
+                // their default browser rather than trying to exec it.
+                Process.Start(new ProcessStartInfo(url) { UseShellExecute = true });
+            }
+            catch (Exception ex)
+            {
+                AppendLine(_currentTarget, $"*** Could not open {url}: {ex.Message}", Color.OrangeRed);
+            }
+        };
+
+        var menu = new ContextMenuStrip();
+        var copyLink = new ToolStripMenuItem("Copy Link", null, (s, e) =>
+        {
+            if (_menuUrl != null) Clipboard.SetText(_menuUrl);
+        });
+        var copy = new ToolStripMenuItem("Copy", null, (s, e) =>
+        {
+            if (log.SelectionLength > 0) Clipboard.SetText(log.SelectedText);
+        });
+        var selectAll = new ToolStripMenuItem("Select All", null, (s, e) => log.SelectAll());
+        menu.Items.Add(copyLink);
+        menu.Items.Add(new ToolStripSeparator());
+        menu.Items.Add(copy);
+        menu.Items.Add(selectAll);
+        menu.Opening += (s, e) =>
+        {
+            _menuUrl = UrlAt(log, log.PointToClient(Cursor.Position));
+            copyLink.Visible = _menuUrl != null;
+            copyLink.Text = _menuUrl == null ? "Copy Link" : $"Copy Link: {Shorten(_menuUrl)}";
+            copy.Enabled = log.SelectionLength > 0;
+        };
+        log.ContextMenuStrip = menu;
+        _logMenus[log] = menu;
+    }
+
+    private static string Shorten(string url) => url.Length <= 48 ? url : url[..45] + "...";
+
+    // Each log's own menu, so split mode can hand it back when it swaps the
+    // stacking menu out again.
+    private readonly Dictionary<RichTextBox, ContextMenuStrip> _logMenus = [];
 
     // Right-click menu over a channel's nick list, acting on every selected nick.
     private void BuildNickMenu(string channel, ListBox nicks)
