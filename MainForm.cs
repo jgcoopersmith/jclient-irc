@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using System.Drawing;
+using System.Text.RegularExpressions;
 using System.Windows.Forms;
 
 namespace IRCClient;
@@ -1293,6 +1294,41 @@ public partial class MainForm : Form
 
     private static bool IsChannel(string name) => name.StartsWith('#') || name.StartsWith('&');
 
+    // http/https/bare-www runs, stopping at whitespace. Trailing sentence
+    // punctuation is trimmed afterwards rather than being excluded here, so a
+    // link written as "see https://x.com, it's good" keeps its own characters.
+    private static readonly Regex UrlPattern = new(
+        @"(https?://|www\.)\S+", RegexOptions.Compiled | RegexOptions.IgnoreCase);
+
+    // Appends text, colouring any URLs in it like links (blue and underlined)
+    // while the rest keeps the line's own colour.
+    private void AppendWithLinks(RichTextBox log, string text, Color color)
+    {
+        var plainFont = log.Font;
+        var linkFont = new Font(plainFont, plainFont.Style | FontStyle.Underline);
+
+        int pos = 0;
+        foreach (Match m in UrlPattern.Matches(text))
+        {
+            if (m.Index > pos)
+            {
+                log.SelectionColor = color;
+                log.SelectionFont = plainFont;
+                log.AppendText(text[pos..m.Index]);
+            }
+            log.SelectionColor = Color.DeepSkyBlue;
+            log.SelectionFont = linkFont;
+            log.AppendText(m.Value);
+            pos = m.Index + m.Length;
+        }
+        if (pos < text.Length)
+        {
+            log.SelectionColor = color;
+            log.SelectionFont = plainFont;
+            log.AppendText(text[pos..]);
+        }
+    }
+
     // The URL the log's context menu was opened over, so "Copy Link" knows what
     // to copy after the click has moved on.
     private string? _menuUrl;
@@ -1332,10 +1368,28 @@ public partial class MainForm : Form
         // built-in detection off.
         log.DetectUrls = false;
 
-        log.MouseDoubleClick += (s, e) =>
+        // A hand cursor is the only cue that the blue underlined run is live
+        log.MouseMove += (s, e) =>
+            log.Cursor = UrlAt(log, e.Location) != null ? Cursors.Hand : Cursors.Default;
+
+        log.MouseUp += (s, e) =>
         {
             if (e.Button != MouseButtons.Left) return;
+            // A click that ends a drag-select is not a click on a link
+            if (log.SelectionLength > 0) return;
             if (UrlAt(log, e.Location) is not { } url) return;
+
+            // Never open anything from the channel without asking: a link in
+            // chat is text a stranger chose, and the browser is the user's.
+            var answer = MessageBox.Show(
+                this,
+                $"Open this link in your browser?\n\n{url}",
+                "Open link",
+                MessageBoxButtons.OKCancel,
+                MessageBoxIcon.Question,
+                MessageBoxDefaultButton.Button2);
+            if (answer != DialogResult.OK) return;
+
             try
             {
                 // UseShellExecute hands the URL to whatever the user has set as
@@ -1672,8 +1726,7 @@ public partial class MainForm : Form
         log.SelectionLength = 0;
         log.SelectionColor = Color.Gray;
         log.AppendText($"[{ts}] ");
-        log.SelectionColor = color ?? Color.LightGray;
-        log.AppendText(text + "\n");
+        AppendWithLinks(log, text + "\n", color ?? Color.LightGray);
         log.ScrollToCaret();
 
         // Highlight the tab if this message landed somewhere the user isn't
