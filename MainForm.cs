@@ -115,6 +115,40 @@ public partial class MainForm : Form
         }
     }
 
+    // Ignore masks, compiled from the raw multi-line setting. Each entry matches
+    // against a full "nick!user@host" prefix.
+    private List<Regex> _ignores = [];
+
+    private void ParseIgnores()
+    {
+        _ignores = [];
+        foreach (var raw in _settings.IgnoreMasks.Split('\n'))
+        {
+            var mask = raw.Trim();
+            if (mask.Length == 0 || mask.StartsWith('#')) continue;
+            // A bare nick ignores that nick from anywhere
+            if (!mask.Contains('!') && !mask.Contains('@')) mask += "!*@*";
+            // Escape everything, then re-open the two wildcards
+            var pattern = "^" + Regex.Escape(mask).Replace("\\*", ".*").Replace("\\?", ".") + "$";
+            try { _ignores.Add(new Regex(pattern, RegexOptions.IgnoreCase)); }
+            catch (ArgumentException) { } // unusable mask: skip it rather than lose the rest
+        }
+    }
+
+    // True when a message's sender matches the ignore list. Servers send a bare
+    // server name as prefix, which no nick!user@host mask can match, so server
+    // messages are never ignored by accident.
+    private bool IsIgnored(IrcMessage msg)
+    {
+        if (_ignores.Count == 0) return false;
+        var prefix = msg.Prefix;
+        if (string.IsNullOrEmpty(prefix)) return false;
+        // Match the full prefix, and also nick!*@* so a bare-nick mask hits
+        // even when the server sends an unusual prefix form.
+        var nick = msg.PrefixNick ?? "";
+        return _ignores.Any(r => r.IsMatch(prefix) || (nick.Length > 0 && r.IsMatch($"{nick}!*@*")));
+    }
+
     // Expand a mIRC-style alias template against the given argument list.
     // Supports $N, $N-, $N-M, $$N (required), $+ (concatenation), $? (prompt).
     // Returns null if a required parameter ($$N) is missing.
@@ -336,6 +370,25 @@ public partial class MainForm : Form
         connectOptions.DropDownItems.Add(new ToolStripSeparator());
         connectOptions.DropDownItems.Add(versionReplyItem);
         optionsItem.DropDownItems.Add(connectOptions);
+
+        var floodOptions = new ToolStripMenuItem("Flood");
+        var floodItem = new ToolStripMenuItem("Flood protection")
+        {
+            CheckOnClick = true,
+            Checked = _settings.FloodProtection
+        };
+        floodItem.CheckedChanged += (s, e) =>
+        {
+            _settings.FloodProtection = floodItem.Checked;
+            SettingsStore.Save(_settings);
+            // Applies to the live connection straight away, not just the next one
+            if (_irc != null) _irc.FloodProtection = floodItem.Checked;
+        };
+        floodOptions.DropDownItems.Add(floodItem);
+        floodOptions.DropDownItems.Add(new ToolStripSeparator());
+        floodOptions.DropDownItems.Add(new ToolStripMenuItem(
+            "Paces your own lines: 5 at once, then 1 every 2 seconds") { Enabled = false });
+        optionsItem.DropDownItems.Add(floodOptions);
         var logOptions = new ToolStripMenuItem("Log");
         string LogToggleText() => !_settings.LoggingEnabled
             ? "Logging: off"
@@ -492,7 +545,17 @@ public partial class MainForm : Form
             SettingsStore.Save(_settings);
             ParseAliases();
         };
+        var ignoreItem = new ToolStripMenuItem("Ignore...");
+        ignoreItem.Click += (s, e) =>
+        {
+            using var dlg = new IgnoreEditForm(_settings.IgnoreMasks);
+            if (dlg.ShowDialog(this) != DialogResult.OK) return;
+            _settings.IgnoreMasks = dlg.Masks;
+            SettingsStore.Save(_settings);
+            ParseIgnores();
+        };
         toolsMenu.DropDownItems.Add(aliasItem);
+        toolsMenu.DropDownItems.Add(ignoreItem);
         _menu.Items.Add(toolsMenu);
 
         MainMenuStrip = _menu;
@@ -650,13 +713,19 @@ public partial class MainForm : Form
         _splitMenu.Items.Add(new ToolStripSeparator());
         _splitMenu.Items.Add("Unstack", null, (s, e) => ExitSplit());
 
-        // Ctrl+A selects all text in the input box
+        // Ctrl+A selects all text in the input box; Ctrl+V and Shift+Insert are
+        // taken over so a multi-line paste can be sent line by line.
         _inputBox.KeyDown += (s, e) =>
         {
             if (e.Control && e.KeyCode == Keys.A)
             {
                 _inputBox.SelectAll();
                 e.SuppressKeyPress = true;
+            }
+            else if ((e.Control && e.KeyCode == Keys.V) || (e.Shift && e.KeyCode == Keys.Insert))
+            {
+                e.SuppressKeyPress = true;
+                PasteIntoInput();
             }
         };
 
@@ -709,7 +778,7 @@ public partial class MainForm : Form
         var inputMenu = new ContextMenuStrip();
         inputMenu.Items.Add("Cut",    null, (s, e) => _inputBox.Cut());
         inputMenu.Items.Add("Copy",   null, (s, e) => _inputBox.Copy());
-        inputMenu.Items.Add("Paste",  null, (s, e) => _inputBox.Paste());
+        inputMenu.Items.Add("Paste",  null, (s, e) => PasteIntoInput());
         inputMenu.Items.Add(new ToolStripSeparator());
         inputMenu.Items.Add("Select All", null, (s, e) => _inputBox.SelectAll());
         inputMenu.Opening += (s, e) =>
@@ -724,6 +793,7 @@ public partial class MainForm : Form
         TopMost = _settings.KeepOnTop;
         if (_settings.DefaultFontEnabled || _settings.ChannelFontEnabled) ApplyFonts();
         ParseAliases();
+        ParseIgnores();
     }
 
     private TabPage? TabPageAt(Point p)
@@ -1770,7 +1840,7 @@ public partial class MainForm : Form
 
         _explicitQuit = false; // a fresh connection deserves a clean quit again
         _irc?.Dispose();
-        var conn = new IrcConnection();
+        var conn = new IrcConnection { FloodProtection = _settings.FloodProtection };
         _irc = conn;
         conn.MessageReceived += OnMessage;
         conn.Disconnected += () =>
@@ -1886,6 +1956,10 @@ public partial class MainForm : Form
 
     private void OnMessage(IrcMessage msg)
     {
+        // Ignored senders are dropped before anything is displayed or answered
+        // — including CTCP, so an ignored user can't provoke an auto-reply.
+        if (msg.Command is "PRIVMSG" or "NOTICE" && IsIgnored(msg)) return;
+
         switch (msg.Command)
         {
             case "001": // RPL_WELCOME
@@ -2272,6 +2346,13 @@ public partial class MainForm : Form
         _historyIndex = _inputHistory.Count;
         _historyDraft = "";
 
+        await SubmitLine(text);
+    }
+
+    // One line on its way out, whether it was typed or pasted: a command runs,
+    // anything else goes to the current window as a message.
+    private async Task SubmitLine(string text)
+    {
         if (_irc == null) return;
 
         if (text.StartsWith('/'))
@@ -2283,6 +2364,60 @@ public partial class MainForm : Form
             if (_currentTarget is "(server)" or "") return;
             await _irc.PrivMsgAsync(_currentTarget, text);
             AppendLine(_currentTarget, $"<{DisplayNick(_currentTarget, _irc.CurrentNick ?? "")}> {text}", Color.LightYellow);
+        }
+    }
+
+    // How many pasted lines go out without asking. Past this it's worth a
+    // confirmation: a stray paste into a channel is public and irreversible.
+    private const int PasteConfirmThreshold = 3;
+
+    // The input box is single-line, so a pasted block would otherwise arrive as
+    // one run-together line. Split it and send a line at a time instead; flood
+    // protection (if on) paces them.
+    private async void PasteIntoInput()
+    {
+        string clip;
+        try { clip = Clipboard.GetText(); }
+        catch { return; } // clipboard busy or holding something that isn't text
+
+        if (string.IsNullOrEmpty(clip)) return;
+
+        var lines = clip.Replace("\r\n", "\n").Replace('\r', '\n')
+            .Split('\n')
+            .Select(l => l.TrimEnd())
+            .Where(l => l.Length > 0)
+            .ToList();
+
+        // Single line: behave like an ordinary paste — into the box, not sent
+        if (lines.Count <= 1)
+        {
+            var one = lines.Count == 1 ? lines[0] : "";
+            var at = _inputBox.SelectionStart;
+            _inputBox.Text = _inputBox.Text.Remove(at, _inputBox.SelectionLength).Insert(at, one);
+            _inputBox.SelectionStart = at + one.Length;
+            return;
+        }
+
+        if (_irc == null || _currentTarget is "(server)" or "") return;
+
+        if (lines.Count > PasteConfirmThreshold)
+        {
+            var preview = string.Join("\n", lines.Take(3));
+            if (lines.Count > 3) preview += $"\n... and {lines.Count - 3} more";
+            var answer = MessageBox.Show(
+                this,
+                $"Send {lines.Count} lines to {_currentTarget}?\n\n{preview}",
+                "Paste",
+                MessageBoxButtons.OKCancel,
+                MessageBoxIcon.Question,
+                MessageBoxDefaultButton.Button2);
+            if (answer != DialogResult.OK) return;
+        }
+
+        foreach (var line in lines)
+        {
+            if (_irc is not { IsConnected: true }) break;
+            await SubmitLine(line);
         }
     }
 

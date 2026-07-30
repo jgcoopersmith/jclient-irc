@@ -111,10 +111,43 @@ public class IrcConnection : IDisposable
         _ = ReadLoopAsync(_cts.Token);
     }
 
-    public async Task SendRawAsync(string line)
+    // Outgoing flood protection, RFC 1459 §8.10's model: every line costs two
+    // seconds of "send credit" and we may run up to ten seconds ahead of real
+    // time, so five lines go out back to back and the rest are paced at one per
+    // two seconds. Servers kill clients that outrun this.
+    private static readonly TimeSpan LineCost = TimeSpan.FromSeconds(2);
+    private static readonly TimeSpan MaxBurst = TimeSpan.FromSeconds(10);
+    private readonly SemaphoreSlim _sendGate = new(1, 1);
+    private DateTime _sendCredit = DateTime.MinValue;
+
+    public bool FloodProtection { get; set; }
+
+    // urgent skips the pacing: PONG must never queue behind a paste or the
+    // server drops us for a ping timeout, and a QUIT should leave immediately.
+    public async Task SendRawAsync(string line, bool urgent = false)
     {
         if (_writer == null) return;
-        await _writer.WriteLineAsync(line);
+
+        await _sendGate.WaitAsync();
+        try
+        {
+            if (FloodProtection && !urgent)
+            {
+                var now = DateTime.UtcNow;
+                if (_sendCredit < now) _sendCredit = now;
+                var ahead = _sendCredit - now;
+                if (ahead > MaxBurst) await Task.Delay(ahead - MaxBurst);
+                _sendCredit += LineCost;
+            }
+            if (_writer == null) return;
+            await _writer.WriteLineAsync(line);
+        }
+        catch (ObjectDisposedException) { }
+        catch (IOException) { }
+        finally
+        {
+            _sendGate.Release();
+        }
     }
 
     // RFC 2812 §3.2.1
@@ -128,10 +161,10 @@ public class IrcConnection : IDisposable
     public Task PrivMsgAsync(string target, string text) => SendRawAsync($"PRIVMSG {target} :{text}");
 
     // RFC 2812 §3.7.2
-    public Task PongAsync(string server) => SendRawAsync($"PONG :{server}");
+    public Task PongAsync(string server) => SendRawAsync($"PONG :{server}", urgent: true);
 
     // RFC 2812 §3.1.7
-    public Task QuitAsync(string reason = "Goodbye") => SendRawAsync($"QUIT :{reason}");
+    public Task QuitAsync(string reason = "Goodbye") => SendRawAsync($"QUIT :{reason}", urgent: true);
 
     private async Task ReadLoopAsync(CancellationToken ct)
     {
