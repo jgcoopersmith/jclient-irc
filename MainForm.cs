@@ -1331,7 +1331,10 @@ public partial class MainForm : Form
             Visible = IsChannel(name)
         };
         WireUrlHandling(log);
-        BuildNickMenu(name, nicks);
+        // Channels get their actions from the nick list; a PM window has none,
+        // so the same actions go on its log instead.
+        if (IsChannel(name)) BuildNickMenu(name, nicks);
+        else if (name != "(server)") AddNickActionsToLogMenu(name, _logMenus[log]);
         // Double-clicking someone in the list opens a private chat with them
         nicks.MouseDoubleClick += (s, e) =>
         {
@@ -1563,6 +1566,111 @@ public partial class MainForm : Form
         nicks.ContextMenuStrip = menu;
     }
 
+    // A private-message window has no nick list to right-click, so its log
+    // carries the same actions, all aimed at the one person it is a chat with.
+    // Op/Deop/Voice/Devoice/Kick need a channel that a PM doesn't have, so they
+    // are bound to the channels we share: a plain item when there is exactly
+    // one, a submenu when there are several, disabled when there are none.
+    private void AddNickActionsToLogMenu(string nick, ContextMenuStrip menu)
+    {
+        var whois = new ToolStripMenuItem($"Whois {nick}", null, (s, e) => WhoisNick(nick, nick));
+        var ping = new ToolStripMenuItem($"CTCP Ping {nick}", null, (s, e) => CtcpNick(nick, nick, "PING"));
+        var version = new ToolStripMenuItem($"CTCP Version {nick}", null, (s, e) => CtcpNick(nick, nick, "VERSION"));
+        var time = new ToolStripMenuItem($"CTCP Time {nick}", null, (s, e) => CtcpNick(nick, nick, "TIME"));
+
+        var op = new ToolStripMenuItem("Op");
+        var deop = new ToolStripMenuItem("Deop");
+        var voice = new ToolStripMenuItem("Voice");
+        var devoice = new ToolStripMenuItem("Devoice");
+        var kick = new ToolStripMenuItem("Kick");
+
+        // Inserted at the top, above the log's own Copy items
+        var items = new ToolStripItem[]
+        {
+            op, deop, voice, devoice,
+            new ToolStripSeparator(),
+            whois, ping, version, time,
+            new ToolStripSeparator(),
+            kick,
+            new ToolStripSeparator()
+        };
+        for (int i = 0; i < items.Length; i++)
+            menu.Items.Insert(i, items[i]);
+
+        menu.Opening += (s, e) =>
+        {
+            var shared = SharedChannels(nick);
+
+            void Bind(ToolStripMenuItem item, string label, Action<string> act)
+            {
+                item.DropDownItems.Clear();
+                item.Click -= OneChannelClick;
+                item.Tag = null;
+
+                if (shared.Count == 0)
+                {
+                    item.Text = $"{label} {nick}";
+                    item.Enabled = false;
+                    return;
+                }
+                item.Enabled = true;
+                if (shared.Count == 1)
+                {
+                    item.Text = $"{label} {nick} in {shared[0]}";
+                    item.Tag = (act, shared[0]);
+                    item.Click += OneChannelClick;
+                    return;
+                }
+                item.Text = $"{label} {nick} in";
+                foreach (var c in shared)
+                {
+                    var channel = c;
+                    item.DropDownItems.Add(new ToolStripMenuItem(channel, null, (s2, e2) => act(channel)));
+                }
+            }
+
+            Bind(op, "Op", c => ModeNick(c, nick, 'o', true));
+            Bind(deop, "Deop", c => ModeNick(c, nick, 'o', false));
+            Bind(voice, "Voice", c => ModeNick(c, nick, 'v', true));
+            Bind(devoice, "Devoice", c => ModeNick(c, nick, 'v', false));
+            Bind(kick, "Kick", c => KickNick(c, nick));
+        };
+    }
+
+    // Click handler for the single-shared-channel case, where the action and
+    // its channel are parked in the item's Tag.
+    private static void OneChannelClick(object? sender, EventArgs e)
+    {
+        if (sender is ToolStripMenuItem { Tag: ValueTuple<Action<string>, string> t })
+            t.Item1(t.Item2);
+    }
+
+    // Single-nick forms of the channel actions, for the PM menu
+    private void ModeNick(string channel, string nick, char mode, bool adding) =>
+        _ = _irc?.SendRawAsync($"MODE {channel} {(adding ? "+" : "-")}{mode} {nick}");
+
+    private void KickNick(string channel, string nick)
+    {
+        if (MessageBox.Show(this, $"Kick {nick} from {channel}?", "Confirm kick",
+                MessageBoxButtons.YesNo, MessageBoxIcon.Warning) != DialogResult.Yes)
+            return;
+        _ = _irc?.SendRawAsync($"KICK {channel} {nick} :{_irc?.CurrentNick}");
+    }
+
+    private void WhoisNick(string window, string nick)
+    {
+        _replyTarget = window;
+        _ = _irc?.SendRawAsync($"WHOIS {nick}");
+    }
+
+    private void CtcpNick(string window, string nick, string verb)
+    {
+        _ctcpReplyWindows[nick] = window;
+        var body = verb == "PING" ? $"PING {DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()}" : verb;
+        _ = _irc?.SendRawAsync($"PRIVMSG {nick} :{CtcpMark}{body}{CtcpMark}");
+        AppendLine(window, $"*** CTCP {verb} to {nick}", Color.DimGray);
+    }
+
     // Selected nicks with their @ / + status prefix stripped back off
     private List<string> SelectedNicks(string channel) =>
         _channels.TryGetValue(channel, out var ch)
@@ -1571,6 +1679,13 @@ public partial class MainForm : Form
                   .Where(s => s.Length > 0)
                   .ToList()
             : [];
+
+    // Channels we and this nick are both in, and which still have a window
+    private List<string> SharedChannels(string nick) =>
+        [.. _channelUsers
+            .Where(kv => _channels.ContainsKey(kv.Key) && IsChannel(kv.Key) && kv.Value.ContainsKey(nick))
+            .Select(kv => kv.Key)
+            .OrderBy(c => c, StringComparer.OrdinalIgnoreCase)];
 
     private void ModeSelected(string channel, char mode, bool adding)
     {
