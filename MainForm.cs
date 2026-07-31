@@ -1600,6 +1600,16 @@ public partial class MainForm : Form
         var versionItem = new ToolStripMenuItem("CTCP Version", null, (s, e) => CtcpSelected(channel, "VERSION"));
         var timeItem = new ToolStripMenuItem("CTCP Time", null, (s, e) => CtcpSelected(channel, "TIME"));
         var kickItem = new ToolStripMenuItem("Kick", null, (s, e) => KickSelected(channel));
+        // Toggles as a group: it offers to stop only when every selected nick
+        // is already ignored, so a mixed selection ignores the rest.
+        var ignoreItem = new ToolStripMenuItem("Ignore", null, (s, e) =>
+        {
+            var targets = SelectedNicks(channel);
+            if (targets.Count == 0) return;
+            var args = string.Join(' ', targets);
+            if (targets.All(IsNickIgnored)) RemoveIgnores(args);
+            else AddIgnores(args);
+        });
         menu.Items.Add(opItem);
         menu.Items.Add(deopItem);
         menu.Items.Add(voiceItem);
@@ -1611,6 +1621,7 @@ public partial class MainForm : Form
         menu.Items.Add(timeItem);
         menu.Items.Add(new ToolStripSeparator());
         menu.Items.Add(kickItem);
+        menu.Items.Add(ignoreItem);
 
         // A right-click outside any row has nothing to act on; otherwise label
         // the items with what they are about to affect.
@@ -1628,6 +1639,7 @@ public partial class MainForm : Form
             versionItem.Text = "CTCP Version" + suffix;
             timeItem.Text = "CTCP Time" + suffix;
             kickItem.Text = "Kick" + suffix;
+            ignoreItem.Text = (SelectedNicks(channel).All(IsNickIgnored) ? "Stop ignoring" : "Ignore") + suffix;
         };
 
         // ListBox does not move the selection on a right-click, so do it here:
