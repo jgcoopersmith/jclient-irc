@@ -119,6 +119,87 @@ public partial class MainForm : Form
     // against a full "nick!user@host" prefix.
     private List<Regex> _ignores = [];
 
+    // Current masks as a list, comments and blanks included so editing from
+    // /ignore doesn't throw away anything typed in Tools > Ignore.
+    private List<string> IgnoreLines() =>
+        [.. _settings.IgnoreMasks.Split('\n').Select(l => l.TrimEnd()).Where(l => l.Length > 0)];
+
+    private void SaveIgnores(List<string> lines)
+    {
+        _settings.IgnoreMasks = string.Join("\n", lines);
+        SettingsStore.Save(_settings);
+        ParseIgnores();
+    }
+
+    // Two masks are the same entry if they match once a bare nick is expanded,
+    // so "/ignore bob" then "/ignore -r bob!*@*" removes what it looks like.
+    private static string NormalizeMask(string mask)
+    {
+        mask = mask.Trim();
+        if (mask.Length > 0 && !mask.Contains('!') && !mask.Contains('@')) mask += "!*@*";
+        return mask;
+    }
+
+    // Whether this exact nick has an entry, i.e. whether the menu's Ignore item
+    // should read as "stop". A wildcard mask that happens to cover them counts
+    // as ignored too, since that is what the user sees happening.
+    private bool IsNickIgnored(string nick) =>
+        IgnoreLines().Any(l => NormalizeMask(l).Equals(NormalizeMask(nick), StringComparison.OrdinalIgnoreCase))
+        || _ignores.Any(r => r.IsMatch($"{nick}!*@*"));
+
+    private void AddIgnores(string args)
+    {
+        var lines = IgnoreLines();
+        var masks = args.Split(' ', StringSplitOptions.RemoveEmptyEntries);
+
+        // No argument: report what is currently ignored
+        if (masks.Length == 0)
+        {
+            var live = lines.Where(l => !l.StartsWith('#')).ToList();
+            if (live.Count == 0)
+                AppendLine(_currentTarget, "*** Ignore list is empty", Color.Cyan);
+            else
+                foreach (var l in live)
+                    AppendLine(_currentTarget, $"*** Ignoring {l}", Color.Cyan);
+            return;
+        }
+
+        foreach (var raw in masks)
+        {
+            var mask = NormalizeMask(raw);
+            if (lines.Any(l => NormalizeMask(l).Equals(mask, StringComparison.OrdinalIgnoreCase)))
+            {
+                AppendLine(_currentTarget, $"*** Already ignoring {mask}", Color.Cyan);
+                continue;
+            }
+            lines.Add(mask);
+            AppendLine(_currentTarget, $"*** Ignoring {mask}", Color.Cyan);
+        }
+        SaveIgnores(lines);
+    }
+
+    private void RemoveIgnores(string args)
+    {
+        var masks = args.Split(' ', StringSplitOptions.RemoveEmptyEntries);
+        if (masks.Length == 0)
+        {
+            AppendLine(_currentTarget, "*** Usage: /ignore -r <mask>", Color.OrangeRed);
+            return;
+        }
+
+        var lines = IgnoreLines();
+        foreach (var raw in masks)
+        {
+            var mask = NormalizeMask(raw);
+            int removed = lines.RemoveAll(l =>
+                NormalizeMask(l).Equals(mask, StringComparison.OrdinalIgnoreCase));
+            AppendLine(_currentTarget,
+                removed > 0 ? $"*** No longer ignoring {mask}" : $"*** Not ignoring {mask}",
+                removed > 0 ? Color.Cyan : Color.OrangeRed);
+        }
+        SaveIgnores(lines);
+    }
+
     private void ParseIgnores()
     {
         _ignores = [];
@@ -1583,6 +1664,12 @@ public partial class MainForm : Form
         var voice = new ToolStripMenuItem("Voice");
         var devoice = new ToolStripMenuItem("Devoice");
         var kick = new ToolStripMenuItem("Kick");
+        // Same list /ignore and Tools > Ignore write to, so the item toggles
+        var ignore = new ToolStripMenuItem("Ignore", null, (s, e) =>
+        {
+            if (IsNickIgnored(nick)) RemoveIgnores(nick);
+            else AddIgnores(nick);
+        });
 
         // Inserted at the top, above the log's own Copy items
         var items = new ToolStripItem[]
@@ -1591,7 +1678,7 @@ public partial class MainForm : Form
             new ToolStripSeparator(),
             whois, ping, version, time,
             new ToolStripSeparator(),
-            kick,
+            kick, ignore,
             new ToolStripSeparator()
         };
         for (int i = 0; i < items.Length; i++)
@@ -1599,6 +1686,8 @@ public partial class MainForm : Form
 
         menu.Opening += (s, e) =>
         {
+            ignore.Text = IsNickIgnored(nick) ? $"Stop ignoring {nick}" : $"Ignore {nick}";
+
             var shared = SharedChannels(nick);
 
             void Bind(ToolStripMenuItem item, string label, Action<string> act)
@@ -2621,6 +2710,18 @@ public partial class MainForm : Form
                 break;
             case "RAW":
                 await _irc.SendRawAsync(rest);
+                break;
+            // /ignore              list the masks
+            // /ignore <mask>...    add each
+            // /ignore -r <mask>... remove each (also /unignore)
+            case "IGNORE":
+                if (rest.StartsWith("-r", StringComparison.OrdinalIgnoreCase))
+                    RemoveIgnores(rest[2..]);
+                else
+                    AddIgnores(rest);
+                break;
+            case "UNIGNORE":
+                RemoveIgnores(rest);
                 break;
             // Wipes the active window's scrollback only; nothing is sent and no
             // other window is touched.
