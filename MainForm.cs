@@ -23,6 +23,18 @@ public partial class MainForm : Form
     private readonly Dictionary<string, string> _topics = new(StringComparer.OrdinalIgnoreCase);
     private string? _activeServer;
 
+    // True from the moment a connection drops until the next one is up, which
+    // is what reddens the tab labels. It stays false before the first connect:
+    // never having connected is not the same as having lost one.
+    private bool _connectionLost;
+
+    private void SetConnectionLost(bool lost)
+    {
+        if (_connectionLost == lost) return;
+        _connectionLost = lost;
+        _tabs.Invalidate();
+    }
+
     // The window a query command (/who, /whois, /list, /raw, ...) was typed in.
     // Server replies to it are printed there instead of the server tab, and are
     // cleared once the reply's end-of-list numeric arrives so later unsolicited
@@ -709,7 +721,11 @@ public partial class MainForm : Form
             {
                 e.DrawBackground();
             }
-            var color = _unreadTabs.Contains(tab.Text) ? Color.DarkOrange : _tabs.ForeColor;
+            // A dropped connection reddens every tab until we are back on, and
+            // outranks the unread highlight: nothing new can arrive while down.
+            var color = _connectionLost ? Color.Red
+                : _unreadTabs.Contains(tab.Text) ? Color.DarkOrange
+                : _tabs.ForeColor;
             TextRenderer.DrawText(e.Graphics, tab.Text, _tabs.Font, e.Bounds, color,
                 TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter);
         };
@@ -2073,6 +2089,7 @@ public partial class MainForm : Form
             _disconnectBtn.Enabled = false;
             _activeServer = null;
             _replyTarget = null;
+            SetConnectionLost(true);
             UpdateAllHeaders();
             AppendLine("(server)", "*** Disconnected", Color.Orange);
             if (_settings.ReconnectOnDisconnect)
@@ -2087,6 +2104,7 @@ public partial class MainForm : Form
             _statusLabel.Text = $"Connected to {c.Server} as {c.Nick}";
             _disconnectBtn.Enabled = true;
             _activeServer = c.Server;
+            SetConnectionLost(false);
             UpdateAllHeaders();
         }
         catch (Exception ex)
@@ -2126,6 +2144,7 @@ public partial class MainForm : Form
         _statusLabel.Text = "Disconnected";
         _activeServer = null;
         _replyTarget = null;
+        SetConnectionLost(true);
         UpdateAllHeaders();
         AppendLine("(server)", "*** Disconnected", Color.Orange);
     }
