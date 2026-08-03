@@ -692,6 +692,19 @@ public partial class MainForm : Form
                 _currentTarget = _tabs.SelectedTab.Text;
                 if (_unreadTabs.Remove(_currentTarget))
                     _tabs.Invalidate();
+
+                // While vertically stacked the strip is still there, but the
+                // page area below it isn't: picking a window that isn't in the
+                // stack has to unstack to show it. Picking one that is in the
+                // stack just aims the input box at that pane.
+                if (InSplitMode)
+                {
+                    var picked = _currentTarget;
+                    if (_splitChannels.Contains(picked, StringComparer.OrdinalIgnoreCase))
+                        SetSplitCurrentTarget(picked);
+                    else
+                        BeginInvoke(ExitSplit);
+                }
             }
             // Switching windows leaves focus on the tab strip; put the caret
             // back where the user actually types. Deferred, because the tab
@@ -747,6 +760,31 @@ public partial class MainForm : Form
                     _tabs.Invalidate();
                 }
             }
+            else if (e.Button == MouseButtons.Left)
+            {
+                // Start of a possible reorder drag
+                _dragTabIndex = TabIndexAt(e.Location);
+                _dragTabPage = _dragTabIndex >= 0 ? _tabs.TabPages[_dragTabIndex] : null;
+            }
+        };
+
+        // Dragging a tab sideways moves it past its neighbours, one position at
+        // a time, so the strip reorders under the cursor as you go.
+        _tabs.MouseMove += (s, e) =>
+        {
+            if (_dragTabPage == null || e.Button != MouseButtons.Left) return;
+            MoveDraggedTab(TabIndexAt(e.Location));
+        };
+
+        // The move is repeated on release because a TabControl does not reliably
+        // raise MouseMove while a button is held: without this, a drag that
+        // reported no movement would do nothing at all.
+        _tabs.MouseUp += (s, e) =>
+        {
+            if (e.Button != MouseButtons.Left) return;
+            MoveDraggedTab(TabIndexAt(e.Location));
+            _dragTabPage = null;
+            _dragTabIndex = -1;
         };
 
         // Right-click on a tab: stack options plus Close for the clicked tab
@@ -893,6 +931,35 @@ public partial class MainForm : Form
         ParseIgnores();
     }
 
+    // The tab being dragged to a new position, and where it currently sits
+    private TabPage? _dragTabPage;
+    private int _dragTabIndex = -1;
+
+    // Moves the dragged tab to the position under the cursor, if that is a
+    // different tab than it already occupies.
+    private void MoveDraggedTab(int over)
+    {
+        if (_dragTabPage == null || over < 0) return;
+        int at = _tabs.TabPages.IndexOf(_dragTabPage);
+        if (at < 0 || at == over) return;
+
+        var page = _dragTabPage;
+        _tabs.SuspendLayout();
+        _tabs.TabPages.Remove(page);
+        _tabs.TabPages.Insert(over, page);
+        _tabs.SelectedTab = page;
+        _tabs.ResumeLayout();
+        _dragTabIndex = over;
+    }
+
+    private int TabIndexAt(Point p)
+    {
+        for (int i = 0; i < _tabs.TabCount; i++)
+            if (_tabs.GetTabRect(i).Contains(p))
+                return i;
+        return -1;
+    }
+
     private TabPage? TabPageAt(Point p)
     {
         for (int i = 0; i < _tabs.TabCount; i++)
@@ -1033,11 +1100,34 @@ public partial class MainForm : Form
         }
         _splitPanel.ResumeLayout();
 
-        _tabs.Visible = false;
+        // The tab strip stays above the panes in either orientation: without it
+        // there is no sign of activity in the windows that aren't stacked.
+        // Shrunk to the strip itself, since the page area below it holds
+        // nothing while the logs live in the panes.
+        _tabs.Dock = DockStyle.Top;
+        _tabs.Height = (_tabs.TabCount > 0 ? _tabs.GetTabRect(0).Bottom : LogicalToDeviceUnits(22))
+                       + LogicalToDeviceUnits(4);
+        _tabs.Visible = true;
         _splitPanel.Visible = true;
         if (!_splitChannels.Contains(_currentTarget, StringComparer.OrdinalIgnoreCase))
             _currentTarget = _splitChannels[0];
         UpdateSplitHeaderColors();
+
+        // Re-tiling resizes every log, which leaves the view wherever the old
+        // layout had scrolled to. Put each back at the newest line.
+        BeginInvoke(() =>
+        {
+            foreach (var name in _splitChannels)
+                if (_channels.TryGetValue(name, out var c))
+                    ScrollToEnd(c.log);
+        });
+    }
+
+    private static void ScrollToEnd(RichTextBox log)
+    {
+        log.SelectionStart = log.TextLength;
+        log.SelectionLength = 0;
+        log.ScrollToCaret();
     }
 
     // Returns every stacked log to its own TabPage and disposes the panes
@@ -1068,9 +1158,13 @@ public partial class MainForm : Form
             _unreadTabs.Remove(name);
         _splitChannels.Clear();
         _splitPanel.Visible = false;
+        // Undo the strip-only docking a vertical stack may have left behind
+        _tabs.Dock = DockStyle.Fill;
         _tabs.Visible = true;
         _currentTarget = _tabs.SelectedTab?.Text ?? "(server)";
         _tabs.Invalidate();
+        if (_channels.TryGetValue(_currentTarget, out var current))
+            BeginInvoke(() => ScrollToEnd(current.log));
     }
 
     // Mark the pane whose messages the input box sends to
