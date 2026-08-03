@@ -1636,7 +1636,7 @@ public partial class MainForm : Form
             SelectionMode = SelectionMode.MultiExtended,
             Visible = IsChannel(name)
         };
-        WireUrlHandling(log);
+        WireUrlHandling(name, log);
         // Channels get their actions from the nick list; a PM window has none,
         // so the same actions go on its log instead.
         if (IsChannel(name)) BuildNickMenu(name, nicks);
@@ -1739,8 +1739,17 @@ public partial class MainForm : Form
 
     // Double-click a link to open it, right-click for Copy Link. Wired per log
     // because each channel window builds its own RichTextBox.
-    private void WireUrlHandling(RichTextBox log)
+    private void WireUrlHandling(string window, RichTextBox log)
     {
+        // Keep the highlight on screen once focus returns to the input bar,
+        // otherwise a selection made for "Set topic" would grey out and look
+        // like it had been lost.
+        log.HideSelection = false;
+
+        // Reading or selecting in a log shouldn't leave the caret stranded
+        // there. Deferred to MouseUp so a drag-selection completes first.
+        log.MouseUp += (s, e) => BeginInvoke(() => _inputBox.Focus());
+
         // RichTextBox auto-links URLs by default and handles the mouse over
         // them itself, which swallows the double-click and the context menu
         // exactly where a link is. We do our own thing with links, so turn the
@@ -1791,7 +1800,20 @@ public partial class MainForm : Form
             if (log.SelectionLength > 0) Clipboard.SetText(log.SelectedText);
         });
         var selectAll = new ToolStripMenuItem("Select All", null, (s, e) => log.SelectAll());
+        // Turn highlighted text into the channel's topic
+        var setTopic = new ToolStripMenuItem("Set Topic", null, (s, e) =>
+        {
+            var text = SelectedTopicText(log);
+            if (text.Length == 0) return;
+            // The highlight is a starting point, not the final wording: open it
+            // for editing, and send only on OK.
+            if (!PromptText("Set Topic", $"Topic for {window}:", ref text)) return;
+            text = text.Trim();
+            if (text.Length == 0) return;
+            _ = _irc?.SendRawAsync($"TOPIC {window} :{text}");
+        });
         menu.Items.Add(copyLink);
+        menu.Items.Add(setTopic);
         menu.Items.Add(new ToolStripSeparator());
         menu.Items.Add(copy);
         menu.Items.Add(selectAll);
@@ -1801,12 +1823,27 @@ public partial class MainForm : Form
             copyLink.Visible = _menuUrl != null;
             copyLink.Text = _menuUrl == null ? "Copy Link" : $"Copy Link: {Shorten(_menuUrl)}";
             copy.Enabled = log.SelectionLength > 0;
+
+            // Only in a channel, only with something highlighted, and only
+            // while connected — the topic goes to the server.
+            var topicText = SelectedTopicText(log);
+            setTopic.Visible = IsChannel(window) && topicText.Length > 0 && _irc is { IsConnected: true };
+            setTopic.Text = $"Set Topic: {Shorten(topicText)}...";
         };
         log.ContextMenuStrip = menu;
         _logMenus[log] = menu;
     }
 
     private static string Shorten(string url) => url.Length <= 48 ? url : url[..45] + "...";
+
+    // The highlighted text as a topic: a topic is a single line, so newlines
+    // become spaces rather than truncating at the first one.
+    private static string SelectedTopicText(RichTextBox log) =>
+        string.Join(' ', log.SelectedText
+                .Replace("\r", "\n")
+                .Split('\n', StringSplitOptions.RemoveEmptyEntries)
+                .Select(l => l.Trim()))
+            .Trim();
 
     // Each log's own menu, so split mode can hand it back when it swaps the
     // stacking menu out again.
