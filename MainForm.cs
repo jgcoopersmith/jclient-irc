@@ -5,6 +5,15 @@ using System.Windows.Forms;
 
 namespace IRCClient;
 
+// How stacked windows are arranged.
+public enum StackLayout
+{
+    Horizontal, // side by side, one column each
+    Vertical,   // one above the other, full width
+    Tile,       // a grid, as square as the count allows
+    Layered     // cascaded and overlapping, click one to raise it
+}
+
 public partial class MainForm : Form
 {
     private IrcConnection? _irc;
@@ -88,7 +97,11 @@ public partial class MainForm : Form
     private readonly Dictionary<string, Label> _splitHeaders = new(StringComparer.OrdinalIgnoreCase);
     private readonly TableLayoutPanel _splitPanel = new() { Dock = DockStyle.Fill, Visible = false };
     private readonly ContextMenuStrip _splitMenu = new();
-    private bool _splitHorizontal;
+    private StackLayout _splitLayout;
+
+    // Host for Layered mode, where panes are positioned by hand instead of by
+    // the table: it sits in the table's single cell and holds the cascade.
+    private Panel? _layerHost;
     private bool InSplitMode => _splitChannels.Count > 0;
 
     // Drag-to-swap state: pane header being dragged and the pane under the cursor
@@ -791,9 +804,13 @@ public partial class MainForm : Form
         TabPage? _rightClickedTab = null;
         var tabMenu = new ContextMenuStrip();
         var stackHItem = new ToolStripMenuItem("Stack Horizontal");
-        stackHItem.Click += (s, e) => EnterSplit(horizontal: true);
+        stackHItem.Click += (s, e) => EnterSplit(StackLayout.Horizontal);
         var stackVItem = new ToolStripMenuItem("Stack Vertical");
-        stackVItem.Click += (s, e) => EnterSplit(horizontal: false);
+        stackVItem.Click += (s, e) => EnterSplit(StackLayout.Vertical);
+        var stackTileItem = new ToolStripMenuItem("Tile");
+        stackTileItem.Click += (s, e) => EnterSplit(StackLayout.Tile);
+        var stackLayerItem = new ToolStripMenuItem("Layered");
+        stackLayerItem.Click += (s, e) => EnterSplit(StackLayout.Layered);
         var channelSettingsItem = new ToolStripMenuItem("Channel Settings...");
         channelSettingsItem.Click += (s, e) =>
         {
@@ -819,6 +836,8 @@ public partial class MainForm : Form
         };
         tabMenu.Items.Add(stackHItem);
         tabMenu.Items.Add(stackVItem);
+        tabMenu.Items.Add(stackTileItem);
+        tabMenu.Items.Add(stackLayerItem);
         tabMenu.Items.Add(new ToolStripSeparator());
         tabMenu.Items.Add(channelSettingsItem);
         tabMenu.Items.Add(logWindowItem);
@@ -843,8 +862,10 @@ public partial class MainForm : Form
         };
 
         // Right-click menu while stacked: re-orient or go back to tabs
-        _splitMenu.Items.Add("Stack Horizontal", null, (s, e) => BuildSplit([.. _splitChannels], horizontal: true));
-        _splitMenu.Items.Add("Stack Vertical", null, (s, e) => BuildSplit([.. _splitChannels], horizontal: false));
+        _splitMenu.Items.Add("Stack Horizontal", null, (s, e) => BuildSplit([.. _splitChannels], StackLayout.Horizontal));
+        _splitMenu.Items.Add("Stack Vertical", null, (s, e) => BuildSplit([.. _splitChannels], StackLayout.Vertical));
+        _splitMenu.Items.Add("Tile", null, (s, e) => BuildSplit([.. _splitChannels], StackLayout.Tile));
+        _splitMenu.Items.Add("Layered", null, (s, e) => BuildSplit([.. _splitChannels], StackLayout.Layered));
         _splitMenu.Items.Add(new ToolStripSeparator());
         _splitMenu.Items.Add("Unstack", null, (s, e) => ExitSplit());
 
@@ -1003,17 +1024,17 @@ public partial class MainForm : Form
     }
 
     // Stack the Ctrl+selected tabs, or every tab if fewer than two are selected
-    private void EnterSplit(bool horizontal)
+    private void EnterSplit(StackLayout layout)
     {
         var all = _tabs.TabPages.Cast<TabPage>().Select(t => t.Text);
         var targets = _ctrlSelectedTabs.Count >= 2
             ? all.Where(_ctrlSelectedTabs.Contains).ToList()
             : all.ToList();
         _ctrlSelectedTabs.Clear();
-        BuildSplit(targets, horizontal);
+        BuildSplit(targets, layout);
     }
 
-    private void BuildSplit(List<string> channels, bool horizontal)
+    private void BuildSplit(List<string> channels, StackLayout layout)
     {
         TearDownSplitPanes();
         _splitChannels.Clear();
@@ -1023,18 +1044,43 @@ public partial class MainForm : Form
             ExitSplit();
             return;
         }
-        _splitHorizontal = horizontal;
+        _splitLayout = layout;
 
         int n = _splitChannels.Count;
+        // Tile aims for a grid as square as the count allows, filling rows
+        // first: 4 windows make 2x2, 5 make 3x2 with one gap.
+        int cols = layout switch
+        {
+            StackLayout.Horizontal => n,
+            StackLayout.Vertical => 1,
+            StackLayout.Tile => (int)Math.Ceiling(Math.Sqrt(n)),
+            _ => 1 // Layered puts everything in one cell
+        };
+        int rows = layout switch
+        {
+            StackLayout.Horizontal => 1,
+            StackLayout.Vertical => n,
+            StackLayout.Tile => (int)Math.Ceiling((double)n / cols),
+            _ => 1
+        };
+
         _splitPanel.SuspendLayout();
         _splitPanel.ColumnStyles.Clear();
         _splitPanel.RowStyles.Clear();
-        _splitPanel.ColumnCount = horizontal ? n : 1;
-        _splitPanel.RowCount = horizontal ? 1 : n;
-        for (int i = 0; i < n; i++)
+        _splitPanel.ColumnCount = cols;
+        _splitPanel.RowCount = rows;
+        for (int i = 0; i < cols; i++)
+            _splitPanel.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100f / cols));
+        for (int i = 0; i < rows; i++)
+            _splitPanel.RowStyles.Add(new RowStyle(SizeType.Percent, 100f / rows));
+
+        // Layered mode positions its panes itself, so it needs a plain panel to
+        // do it in — a table would just put each one in a cell.
+        if (layout == StackLayout.Layered)
         {
-            if (horizontal) _splitPanel.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100f / n));
-            else _splitPanel.RowStyles.Add(new RowStyle(SizeType.Percent, 100f / n));
+            _layerHost = new Panel { Dock = DockStyle.Fill, ContextMenuStrip = _splitMenu };
+            _layerHost.Resize += (s, e) => LayoutLayeredPanes();
+            _splitPanel.Controls.Add(_layerHost, 0, 0);
         }
 
         for (int i = 0; i < n; i++)
@@ -1053,7 +1099,14 @@ public partial class MainForm : Form
                 AutoEllipsis = true,
                 ContextMenuStrip = _splitMenu
             };
-            var pane = new Panel { Dock = DockStyle.Fill, Margin = new Padding(LogicalToDeviceUnits(1)), ContextMenuStrip = _splitMenu };
+            var pane = new Panel
+            {
+                // Layered panes are placed by hand; the rest fill their cell
+                Dock = layout == StackLayout.Layered ? DockStyle.None : DockStyle.Fill,
+                Margin = new Padding(LogicalToDeviceUnits(1)),
+                ContextMenuStrip = _splitMenu,
+                BorderStyle = layout == StackLayout.Layered ? BorderStyle.FixedSingle : BorderStyle.None
+            };
             // Move the whole body so the nick list follows its log into the pane
             var body = _channels[name].body;
             body.Parent?.Controls.Remove(body);
@@ -1062,7 +1115,26 @@ public partial class MainForm : Form
             pane.Controls.Add(header);
             _splitPanes.Add(pane);
             _splitHeaders[name] = header;
-            _splitPanel.Controls.Add(pane, horizontal ? i : 0, horizontal ? 0 : i);
+            if (layout == StackLayout.Layered)
+            {
+                _layerHost!.Controls.Add(pane);
+                // Clicking anywhere in a buried window raises it and makes it
+                // the one the input box talks to.
+                var raiseName = name;
+                var raisePane = pane;
+                void Raise(object? s, EventArgs e)
+                {
+                    raisePane.BringToFront();
+                    SetSplitCurrentTarget(raiseName);
+                }
+                pane.Click += Raise;
+                header.Click += Raise;
+                log.Click += Raise;
+            }
+            else
+            {
+                _splitPanel.Controls.Add(pane, i % cols, i / cols);
+            }
 
             // Drag a pane by its header onto another pane to swap positions
             var dragName = name;
@@ -1112,6 +1184,8 @@ public partial class MainForm : Form
         if (!_splitChannels.Contains(_currentTarget, StringComparer.OrdinalIgnoreCase))
             _currentTarget = _splitChannels[0];
         UpdateSplitHeaderColors();
+        // The host has its real size only once the panel above is laid out
+        if (layout == StackLayout.Layered) BeginInvoke(LayoutLayeredPanes);
 
         // Re-tiling resizes every log, which leaves the view wherever the old
         // layout had scrolled to. Put each back at the newest line.
@@ -1148,6 +1222,8 @@ public partial class MainForm : Form
             pane.Dispose();
         _splitPanes.Clear();
         _splitHeaders.Clear();
+        _layerHost?.Dispose();
+        _layerHost = null;
     }
 
     private void ExitSplit()
@@ -1187,6 +1263,45 @@ public partial class MainForm : Form
         }
     }
 
+    // Cascades the layered panes: each one offset down and right from the last,
+    // all the same size, so every title bar stays visible. Recomputed on resize
+    // because the panes are positioned rather than docked.
+    private void LayoutLayeredPanes()
+    {
+        if (_layerHost == null || _splitPanes.Count == 0) return;
+
+        int n = _splitPanes.Count;
+        int minW = LogicalToDeviceUnits(120), minH = LogicalToDeviceUnits(80);
+
+        // Cascade by a fixed offset, but never past half the host…
+        int step = LogicalToDeviceUnits(28);
+        int spread = Math.Min(step * (n - 1), Math.Max(_layerHost.Height / 2, 0));
+        step = n > 1 ? spread / (n - 1) : 0;
+
+        int w = Math.Max(_layerHost.Width - step * (n - 1), minW);
+        int h = Math.Max(_layerHost.Height - step * (n - 1), minH);
+
+        // …and, in a host too short for that, give up offset rather than push
+        // the last pane off the bottom: the minimum size wins over the cascade.
+        if (n > 1)
+        {
+            int fitH = Math.Max(_layerHost.Height - h, 0) / (n - 1);
+            int fitW = Math.Max(_layerHost.Width - w, 0) / (n - 1);
+            step = Math.Min(step, Math.Min(fitH, fitW));
+        }
+
+        for (int i = 0; i < n; i++)
+        {
+            var pane = _splitPanes[i];
+            if (pane.IsDisposed) continue;
+            pane.SetBounds(step * i, step * i, w, h);
+            // Controls.Add puts each new pane at the back, which would bury the
+            // cascade under the first one. Raise them in order so the last sits
+            // on top and every header below it stays visible.
+            pane.BringToFront();
+        }
+    }
+
     // Which stacked pane (by channel name) is under the given screen point
     private string? PaneChannelAt(Point screenPoint)
     {
@@ -1205,7 +1320,7 @@ public partial class MainForm : Form
         int j = _splitChannels.FindIndex(c => c.Equals(to, StringComparison.OrdinalIgnoreCase));
         if (i < 0 || j < 0 || i == j) return;
         (_splitChannels[i], _splitChannels[j]) = (_splitChannels[j], _splitChannels[i]);
-        BuildSplit([.. _splitChannels], _splitHorizontal);
+        BuildSplit([.. _splitChannels], _splitLayout);
     }
 
     // Rebuilds (or exits) the split when one of its channels closes
@@ -1217,7 +1332,7 @@ public partial class MainForm : Form
         if (_splitChannels.Count == 0)
             ExitSplit();
         else
-            BuildSplit([.. _splitChannels], _splitHorizontal);
+            BuildSplit([.. _splitChannels], _splitLayout);
     }
 
     private FormBorderStyle _preFullScreenBorder;
