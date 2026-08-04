@@ -1812,8 +1812,10 @@ public partial class MainForm : Form
             if (text.Length == 0) return;
             _ = _irc?.SendRawAsync($"TOPIC {window} :{text}");
         });
+        var pasteSend = new ToolStripMenuItem("Paste and Send", null, (s, e) => PasteToWindow(window));
         menu.Items.Add(copyLink);
         menu.Items.Add(setTopic);
+        menu.Items.Add(pasteSend);
         menu.Items.Add(new ToolStripSeparator());
         menu.Items.Add(copy);
         menu.Items.Add(selectAll);
@@ -1829,6 +1831,13 @@ public partial class MainForm : Form
             var topicText = SelectedTopicText(log);
             setTopic.Visible = IsChannel(window) && topicText.Length > 0 && _irc is { IsConnected: true };
             setTopic.Text = $"Set Topic: {Shorten(topicText)}...";
+
+            // Somewhere to send to, connected, and something to send
+            var clip = ClipboardLines();
+            pasteSend.Visible = window != "(server)" && clip.Count > 0 && _irc is { IsConnected: true };
+            pasteSend.Text = clip.Count > 1
+                ? $"Paste and Send {clip.Count} lines to {window}"
+                : $"Paste and Send to {window}";
         };
         log.ContextMenuStrip = menu;
         _logMenus[log] = menu;
@@ -2855,19 +2864,25 @@ public partial class MainForm : Form
     // The input box is single-line, so a pasted block would otherwise arrive as
     // one run-together line. Split it and send a line at a time instead; flood
     // protection (if on) paces them.
-    private async void PasteIntoInput()
+    // Clipboard text as sendable lines: blank lines dropped, line endings
+    // normalised. Empty when the clipboard is busy or holds something else.
+    private static List<string> ClipboardLines()
     {
         string clip;
         try { clip = Clipboard.GetText(); }
-        catch { return; } // clipboard busy or holding something that isn't text
+        catch { return []; }
 
-        if (string.IsNullOrEmpty(clip)) return;
-
-        var lines = clip.Replace("\r\n", "\n").Replace('\r', '\n')
+        if (string.IsNullOrEmpty(clip)) return [];
+        return [.. clip.Replace("\r\n", "\n").Replace('\r', '\n')
             .Split('\n')
             .Select(l => l.TrimEnd())
-            .Where(l => l.Length > 0)
-            .ToList();
+            .Where(l => l.Length > 0)];
+    }
+
+    private async void PasteIntoInput()
+    {
+        var lines = ClipboardLines();
+        if (lines.Count == 0) return;
 
         // Single line: behave like an ordinary paste — into the box, not sent
         if (lines.Count <= 1)
@@ -2899,6 +2914,36 @@ public partial class MainForm : Form
         {
             if (_irc is not { IsConnected: true }) break;
             await SubmitLine(line);
+        }
+    }
+
+    // Right-click > Paste in a channel or PM window: send the clipboard there
+    // as chat. Lines go out verbatim — a pasted "/quit" is said, not run —
+    // since this pastes text into a conversation rather than typing commands.
+    private async void PasteToWindow(string window)
+    {
+        var lines = ClipboardLines();
+        if (lines.Count == 0 || _irc is not { IsConnected: true }) return;
+
+        if (lines.Count > PasteConfirmThreshold)
+        {
+            var preview = string.Join("\n", lines.Take(3));
+            if (lines.Count > 3) preview += $"\n... and {lines.Count - 3} more";
+            var answer = MessageBox.Show(
+                this,
+                $"Send {lines.Count} lines to {window}?\n\n{preview}",
+                "Paste",
+                MessageBoxButtons.OKCancel,
+                MessageBoxIcon.Question,
+                MessageBoxDefaultButton.Button2);
+            if (answer != DialogResult.OK) return;
+        }
+
+        foreach (var line in lines)
+        {
+            if (_irc is not { IsConnected: true }) break;
+            await _irc.PrivMsgAsync(window, line);
+            AppendLine(window, $"<{DisplayNick(window, _irc.CurrentNick ?? "")}> {line}", Color.LightYellow);
         }
     }
 
