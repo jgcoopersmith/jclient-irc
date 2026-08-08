@@ -37,6 +37,11 @@ public class AppSettings
     // is a disconnect, and the cost is a short delay on long pastes.
     public bool FloodProtection { get; set; } = true;
 
+    // When set, clicking a link in a window opens it straight away instead of
+    // asking first (File > Options > URL). Off by default: a link in chat is
+    // text a stranger chose.
+    public bool OpenUrlsWithoutConfirmation { get; set; }
+
     // Masks whose messages are dropped, one per line (Tools > Ignore).
     // "nick", "nick!user@host" and wildcards (* ?) are all accepted.
     public string IgnoreMasks { get; set; } = "";

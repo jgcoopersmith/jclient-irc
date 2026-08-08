@@ -477,6 +477,20 @@ public partial class MainForm : Form
         connectOptions.DropDownItems.Add(versionReplyItem);
         optionsItem.DropDownItems.Add(connectOptions);
 
+        var urlOptions = new ToolStripMenuItem("URL");
+        var urlNoConfirmItem = new ToolStripMenuItem("Run URL without confirmation")
+        {
+            CheckOnClick = true,
+            Checked = _settings.OpenUrlsWithoutConfirmation
+        };
+        urlNoConfirmItem.CheckedChanged += (s, e) =>
+        {
+            _settings.OpenUrlsWithoutConfirmation = urlNoConfirmItem.Checked;
+            SettingsStore.Save(_settings);
+        };
+        urlOptions.DropDownItems.Add(urlNoConfirmItem);
+        optionsItem.DropDownItems.Add(urlOptions);
+
         var floodOptions = new ToolStripMenuItem("Flood");
         var floodItem = new ToolStripMenuItem("Flood protection")
         {
@@ -1767,16 +1781,20 @@ public partial class MainForm : Form
             if (log.SelectionLength > 0) return;
             if (UrlAt(log, e.Location) is not { } url) return;
 
-            // Never open anything from the channel without asking: a link in
-            // chat is text a stranger chose, and the browser is the user's.
-            var answer = MessageBox.Show(
-                this,
-                $"Open this link in your browser?\n\n{url}",
-                "Open link",
-                MessageBoxButtons.OKCancel,
-                MessageBoxIcon.Question,
-                MessageBoxDefaultButton.Button2);
-            if (answer != DialogResult.OK) return;
+            // A link in chat is text a stranger chose, so confirm before handing
+            // it to the browser — unless the user has turned that off under
+            // File > Options > URL.
+            if (!_settings.OpenUrlsWithoutConfirmation)
+            {
+                var answer = MessageBox.Show(
+                    this,
+                    $"Open this link in your browser?\n\n{url}",
+                    "Open link",
+                    MessageBoxButtons.OKCancel,
+                    MessageBoxIcon.Question,
+                    MessageBoxDefaultButton.Button2);
+                if (answer != DialogResult.OK) return;
+            }
 
             try
             {
