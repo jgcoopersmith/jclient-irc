@@ -387,7 +387,7 @@ public partial class MainForm : Form
         // through LogicalToDeviceUnits, which deterministically multiplies by
         // DeviceDpi/96 — the documented API for manual DPI-aware layout.
         AutoScaleMode = AutoScaleMode.None;
-        Text = "jclient irc for Windows";
+        Text = $"jclient irc for Windows {VersionString}";
         Font = new Font("Segoe UI", 9);
         Size = LogicalToDeviceUnits(new Size(900, 650));
         MinimumSize = LogicalToDeviceUnits(new Size(600, 400));
