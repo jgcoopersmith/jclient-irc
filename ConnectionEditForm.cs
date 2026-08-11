@@ -10,6 +10,7 @@ public class ConnectionEditForm : Form
     private readonly TextBox _serverBox = new() { Dock = DockStyle.Fill };
     private readonly TextBox _portBox = new() { Dock = DockStyle.Fill };
     private readonly TextBox _nickBox = new() { Dock = DockStyle.Fill };
+    private readonly TextBox _nick2Box = new() { Dock = DockStyle.Fill, PlaceholderText = "optional" };
     private readonly TextBox _passBox = new() { Dock = DockStyle.Fill, PasswordChar = '*', PlaceholderText = "optional" };
     private readonly TextBox _channelsBox = new() { Dock = DockStyle.Fill };
 
@@ -27,7 +28,7 @@ public class ConnectionEditForm : Form
         ShowInTaskbar = false;
         StartPosition = FormStartPosition.CenterParent;
         Font = new Font("Segoe UI", 9);
-        ClientSize = LogicalToDeviceUnits(new Size(320, 275));
+        ClientSize = LogicalToDeviceUnits(new Size(320, 307));
         Icon = AppIcon.Get();
 
         if (existing != null)
@@ -36,6 +37,7 @@ public class ConnectionEditForm : Form
             _serverBox.Text = existing.Server;
             _portBox.Text = existing.Port.ToString();
             _nickBox.Text = existing.Nick;
+            _nick2Box.Text = existing.SecondNick;
             _passBox.Text = existing.Password;
             _channelsBox.Text = existing.Channels;
         }
@@ -50,13 +52,13 @@ public class ConnectionEditForm : Form
         {
             Dock = DockStyle.Top,
             ColumnCount = 2,
-            RowCount = 6,
-            Height = LogicalToDeviceUnits(210),
+            RowCount = 7,
+            Height = LogicalToDeviceUnits(242),
             Padding = new Padding(LogicalToDeviceUnits(10))
         };
         layout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, LogicalToDeviceUnits(80)));
         layout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
-        for (int i = 0; i < 6; i++)
+        for (int i = 0; i < 7; i++)
             layout.RowStyles.Add(new RowStyle(SizeType.Absolute, LogicalToDeviceUnits(32)));
 
         void AddRow(int row, string label, Control ctrl)
@@ -70,8 +72,9 @@ public class ConnectionEditForm : Form
         AddRow(1, "Server:", _serverBox);
         AddRow(2, "Port:", _portBox);
         AddRow(3, "Nick:", _nickBox);
-        AddRow(4, "Password:", _passBox);
-        AddRow(5, "Channels:", _channelsBox);
+        AddRow(4, "Alt nick:", _nick2Box);
+        AddRow(5, "Password:", _passBox);
+        AddRow(6, "Channels:", _channelsBox);
 
         // Height must be set explicitly too, not just Width: with AutoScaleMode.None,
         // a Button that never gets an explicit Size falls back to WinForms' hardcoded
@@ -87,6 +90,7 @@ public class ConnectionEditForm : Form
                 Server = _serverBox.Text.Trim(),
                 Port = int.TryParse(_portBox.Text, out var p) ? p : 6667,
                 Nick = _nickBox.Text.Trim(),
+                SecondNick = _nick2Box.Text.Trim(),
                 Password = _passBox.Text,
                 Channels = _channelsBox.Text.Trim()
             };

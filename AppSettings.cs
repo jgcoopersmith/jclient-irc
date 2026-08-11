@@ -46,6 +46,16 @@ public class AppSettings
     // "nick", "nick!user@host" and wildcards (* ?) are all accepted.
     public string IgnoreMasks { get; set; } = "";
 
+    // Where the window was last seen, so it comes back the same size and place.
+    // Width 0 means "never saved" and the built-in default size is used. The
+    // position is the restored (non-maximised) one, so un-maximising a restored
+    // window puts it back where it was.
+    public int WindowX { get; set; }
+    public int WindowY { get; set; }
+    public int WindowWidth { get; set; }
+    public int WindowHeight { get; set; }
+    public bool WindowMaximized { get; set; }
+
     // View menu
     public bool KeepOnTop { get; set; }
 

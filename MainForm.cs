@@ -84,6 +84,10 @@ public partial class MainForm : Form
     private int _historyIndex;
     private string _historyDraft = "";
 
+    // Whether Up has actually started a browse. Down does nothing until it has,
+    // so a freshly typed line can never be replaced by a stashed draft.
+    private bool _browsingHistory;
+
     // Tabs that received messages while not the active tab; drawn highlighted
     // until the user opens them.
     private readonly HashSet<string> _unreadTabs = new(StringComparer.OrdinalIgnoreCase);
@@ -403,6 +407,7 @@ public partial class MainForm : Form
         Size = LogicalToDeviceUnits(new Size(900, 650));
         MinimumSize = LogicalToDeviceUnits(new Size(600, 400));
         Icon = AppIcon.Get();
+        RestoreWindowPlacement();
 
         // Typing anywhere in the main window goes to the input line, whichever
         // control happens to hold focus (a log, the nick list, the connection
@@ -921,15 +926,28 @@ public partial class MainForm : Form
                 if (_historyIndex == _inputHistory.Count)
                     _historyDraft = _inputBox.Text;
                 _historyIndex--;
+                _browsingHistory = true;
                 _inputBox.Text = _inputHistory[_historyIndex];
                 _inputBox.SelectionStart = _inputBox.TextLength;
             }
             else if (e.KeyCode == Keys.Down)
             {
                 e.SuppressKeyPress = true;
-                if (_historyIndex >= _inputHistory.Count) return;
-                _historyIndex++;
-                _inputBox.Text = _historyIndex == _inputHistory.Count ? _historyDraft : _inputHistory[_historyIndex];
+                // Walk forward through the history while there is one to walk;
+                // past the newest entry — or on a line typed from scratch —
+                // Down empties the entry bar.
+                if (_browsingHistory && _historyIndex < _inputHistory.Count - 1)
+                {
+                    _historyIndex++;
+                    _inputBox.Text = _inputHistory[_historyIndex];
+                }
+                else
+                {
+                    _inputBox.Clear();
+                    _historyIndex = _inputHistory.Count;
+                    _historyDraft = "";
+                    _browsingHistory = false;
+                }
                 _inputBox.SelectionStart = _inputBox.TextLength;
             }
         };
@@ -2352,6 +2370,32 @@ public partial class MainForm : Form
         catch { }
     }
 
+    // Which connection's nicks we are working through, and how far down the
+    // list: 0 = the nick itself (already tried), 1 = the alt nick, 2+ = the
+    // nick with four random digits.
+    private SavedConnection? _nickConnection;
+    private int _nickAttempt;
+
+    // The next nick to try after an in-use rejection, or null if there is
+    // nothing sensible left to try.
+    private string? NextNickCandidate()
+    {
+        if (_nickConnection is not { } c) return null;
+        _nickAttempt++;
+
+        if (_nickAttempt == 1)
+        {
+            if (!string.IsNullOrWhiteSpace(c.SecondNick)) return c.SecondNick.Trim();
+            _nickAttempt++; // no alt nick configured: straight to the numbered one
+        }
+
+        var stem = string.IsNullOrWhiteSpace(c.Nick) ? "jclient" : c.Nick.Trim();
+        // Keep it inside the 9-character nick limit RFC 2812 §1.2.1 gives as the
+        // minimum any server must accept, so the digits are never what's cut.
+        if (stem.Length > 5) stem = stem[..5];
+        return $"{stem}{Random.Shared.Next(1000, 10000)}";
+    }
+
     private async Task ConnectAsync(SavedConnection c)
     {
         // Connecting to a DIFFERENT server: the old server's channel windows are
@@ -2362,6 +2406,9 @@ public partial class MainForm : Form
         _windowsServer = c.Server;
 
         _explicitQuit = false; // a fresh connection deserves a clean quit again
+        // Each connection starts at the top of the nick list again
+        _nickConnection = c;
+        _nickAttempt = 0;
         _irc?.Dispose();
         var conn = new IrcConnection { FloodProtection = _settings.FloodProtection };
         _irc = conn;
@@ -2832,10 +2879,22 @@ public partial class MainForm : Form
                 AppendLine("(server)", "*** Server requires registration. Try a different server (e.g. irc.rizon.net) or register your nick.", Color.Orange);
                 break;
 
-            // ERR_NICKNAMEINUSE
+            // ERR_NICKNAMEINUSE — work down the fallbacks rather than sitting
+            // unregistered: the alt nick from the connection, then the primary
+            // with four random digits, renumbering on each further clash.
             case "433":
-                AppendLine("(server)", $"*** Nick already in use: {msg.Params.LastOrDefault()}", Color.Orange);
+            {
+                var taken = msg.Params.Length > 1 ? msg.Params[1] : msg.Params.LastOrDefault() ?? "";
+                AppendLine("(server)", $"*** Nick already in use: {taken}", Color.Orange);
+
+                var next = NextNickCandidate();
+                if (next != null)
+                {
+                    AppendLine("(server)", $"*** Trying {next}", Color.Cyan);
+                    _ = _irc?.SendRawAsync($"NICK {next}", urgent: true);
+                }
                 break;
+            }
 
             // ERR_BADCHANNELKEY / ERR_INVITEONLYCHAN / ERR_BANNEDFROMCHAN
             case "475": case "473": case "474":
@@ -2861,16 +2920,24 @@ public partial class MainForm : Form
 
     private async void OnSend(object? s, EventArgs e)
     {
+        // The last word has no trailing space to trigger a correction, so give
+        // it one before the line leaves.
+        if (!_inputBox.Text.StartsWith('/')) AutoCorrectWordBeforeCaret();
+
         var text = _inputBox.Text.Trim();
         _inputBox.Clear();
-        if (string.IsNullOrEmpty(text)) return;
 
-        // Record in command history (skip consecutive duplicates) and reset
-        // the Up/Down browse position to "past the newest entry".
-        if (_inputHistory.Count == 0 || _inputHistory[^1] != text)
+        // Record in command history (skip consecutive duplicates) and reset the
+        // Up/Down browse position to "past the newest entry". Done before the
+        // empty-line check: pressing Enter on an empty box used to leave the
+        // browse position stale, so a later Down would wipe what was typed.
+        if (text.Length > 0 && (_inputHistory.Count == 0 || _inputHistory[^1] != text))
             _inputHistory.Add(text);
         _historyIndex = _inputHistory.Count;
         _historyDraft = "";
+        _browsingHistory = false;
+
+        if (string.IsNullOrEmpty(text)) return;
 
         await SubmitLine(text);
     }
@@ -2915,9 +2982,25 @@ public partial class MainForm : Form
 
         _spellTimer = new System.Windows.Forms.Timer { Interval = 400 };
         _spellTimer.Tick += (s, e) => { _spellTimer!.Stop(); MarkMisspellings(); };
+
+        // A word is finished by a space or by punctuation; correct it then, so
+        // the change is visible while typing rather than at send time.
+        _inputBox.KeyPress += (s, e) =>
+        {
+            if (e.KeyChar != ' ' && !char.IsPunctuation(e.KeyChar)) return;
+            BeginInvoke(AutoCorrectWordBeforeCaret);
+        };
+
+        // Typing over a recalled command ends the browse: what is in the box is
+        // now the user's line, not a history entry to arrow away from.
+        _inputBox.KeyPress += (s, e) =>
+        {
+            if (!char.IsControl(e.KeyChar)) _browsingHistory = false;
+        };
         _inputBox.TextChanged += (s, e) =>
         {
             if (_spellMarking) return;
+            NoteCorrectionUndone();
             _spellTimer!.Stop();
             _spellTimer.Start();
         };
@@ -2963,6 +3046,82 @@ public partial class MainForm : Form
             }
             _spellMarking = false;
         }
+    }
+
+    // --- Autocorrect ------------------------------------------------------
+    // A correction gets one attempt: if it is undone — the word typed back the
+    // way it was — that spelling is left alone from then on, however the user
+    // meant it. Words nobody has overruled keep being corrected.
+    private readonly HashSet<string> _autoCorrectOff = new(StringComparer.OrdinalIgnoreCase);
+
+    // The correction just made, watched for being undone
+    private (string Original, string Fixed, int Start)? _lastCorrection;
+
+    // Called as the text changes: if the word we corrected has been put back
+    // the way it was, that is the user overruling us, and it stands.
+    private void NoteCorrectionUndone()
+    {
+        if (_lastCorrection is not { } last) return;
+
+        var text = _inputBox.Text;
+        if (last.Start + last.Fixed.Length <= text.Length
+            && text.Substring(last.Start, last.Fixed.Length) == last.Fixed)
+            return; // our correction is still standing
+
+        // It was changed — back to the original or to something else entirely.
+        // Either way the user has decided how that word is spelt.
+        _autoCorrectOff.Add(last.Original);
+        _lastCorrection = null;
+    }
+
+    // The fix for a word, or null to leave it alone. Only two kinds are made:
+    // the standalone "i", and a misspelling whose correction is the same
+    // letters with an apostrophe — im to I'm, dont to don't, youre to you're.
+    // Anything needing a different word is left to the suggestions menu.
+    private string? AutoCorrection(string word)
+    {
+        if (word.Length == 0 || _autoCorrectOff.Contains(word)) return null;
+
+        if (word == "i") return "I";
+        // Windows doesn't flag these: they are real words, so a lone
+        // apostrophe rule can't reach them and nothing is guessed for them.
+        if (!word.Contains('\'') && SpellCheck.Check(word).Count > 0)
+        {
+            static string Bare(string s) => s.Replace("'", "").Replace("’", "").ToLowerInvariant();
+            foreach (var suggestion in SpellCheck.Suggest(word))
+                if (suggestion.Contains('\'') && Bare(suggestion) == Bare(word))
+                    return suggestion;
+        }
+        return null;
+    }
+
+    // Corrects the word immediately before the caret, as it is completed.
+    private void AutoCorrectWordBeforeCaret()
+    {
+        if (!SpellCheck.Available || _spellMarking) return;
+
+        var text = _inputBox.Text;
+        int caret = _inputBox.SelectionStart;
+        if (caret > text.Length) return;
+
+        // Walk back over whatever ended the word, then over the word itself
+        int end = caret;
+        while (end > 0 && !char.IsLetter(text[end - 1]) && text[end - 1] != '\'') end--;
+        int start = end;
+        while (start > 0 && (char.IsLetter(text[start - 1]) || text[start - 1] == '\'')) start--;
+        if (end <= start) return;
+
+        var word = text[start..end];
+        if (AutoCorrection(word) is not { } fixedWord || fixedWord == word) return;
+
+        _spellMarking = true;
+        _inputBox.Select(start, end - start);
+        _inputBox.SelectedText = fixedWord;
+        _inputBox.SelectionStart = caret + (fixedWord.Length - word.Length);
+        _inputBox.SelectionLength = 0;
+        _spellMarking = false;
+        _lastCorrection = (word, fixedWord, start);
+        MarkMisspellings();
     }
 
     // The misspelled word under the mouse, as (word, start, length)
@@ -3373,8 +3532,84 @@ public partial class MainForm : Form
     // by the minimize-to-tray branch below.
     private bool _exitFromTray;
 
+    // --- Window placement -------------------------------------------------
+    // Saved as the window moves rather than only on exit, so a crash or a kill
+    // still leaves the last position behind. The write is debounced: dragging a
+    // window raises a stream of these.
+    private System.Windows.Forms.Timer? _placementTimer;
+    private bool _placementRestored;
+
+    private void RestoreWindowPlacement()
+    {
+        if (_settings.WindowWidth <= 0 || _settings.WindowHeight <= 0) return;
+
+        var saved = new Rectangle(_settings.WindowX, _settings.WindowY,
+                                  _settings.WindowWidth, _settings.WindowHeight);
+
+        // A monitor that has since been unplugged (or rearranged) would put the
+        // window somewhere unreachable, so only honour a position still on a
+        // screen. Size is kept either way.
+        bool onScreen = Screen.AllScreens.Any(s => s.WorkingArea.IntersectsWith(saved));
+        StartPosition = onScreen ? FormStartPosition.Manual : FormStartPosition.WindowsDefaultLocation;
+        if (onScreen) Location = saved.Location;
+        Size = new Size(Math.Max(saved.Width, MinimumSize.Width),
+                        Math.Max(saved.Height, MinimumSize.Height));
+
+        if (_settings.WindowMaximized) WindowState = FormWindowState.Maximized;
+        _placementRestored = true;
+    }
+
+    private void SchedulePlacementSave()
+    {
+        // Ignore the layout churn while the form is still being built
+        if (!IsHandleCreated || (!_placementRestored && !Visible)) return;
+
+        _placementTimer ??= new System.Windows.Forms.Timer { Interval = 800 };
+        _placementTimer.Tick -= PlacementTick;
+        _placementTimer.Tick += PlacementTick;
+        _placementTimer.Stop();
+        _placementTimer.Start();
+    }
+
+    private void PlacementTick(object? sender, EventArgs e)
+    {
+        _placementTimer?.Stop();
+        SaveWindowPlacement();
+    }
+
+    private void SaveWindowPlacement()
+    {
+        // Minimised has no useful geometry, and RestoreBounds carries the
+        // pre-maximise rectangle — which is what should come back on restore.
+        if (WindowState == FormWindowState.Minimized) return;
+
+        var bounds = WindowState == FormWindowState.Maximized ? RestoreBounds : Bounds;
+        if (bounds.Width <= 0 || bounds.Height <= 0) return;
+
+        _settings.WindowX = bounds.X;
+        _settings.WindowY = bounds.Y;
+        _settings.WindowWidth = bounds.Width;
+        _settings.WindowHeight = bounds.Height;
+        _settings.WindowMaximized = WindowState == FormWindowState.Maximized;
+        SettingsStore.Save(_settings);
+    }
+
+    protected override void OnResize(EventArgs e)
+    {
+        base.OnResize(e);
+        SchedulePlacementSave();
+    }
+
+    protected override void OnMove(EventArgs e)
+    {
+        base.OnMove(e);
+        SchedulePlacementSave();
+    }
+
     protected override void OnFormClosing(FormClosingEventArgs e)
     {
+        SaveWindowPlacement();
+
         // "Keep running when closed": the X button hides the window and leaves
         // the connection up. Windows shutting down or the tray's own Exit still
         // close for real.
