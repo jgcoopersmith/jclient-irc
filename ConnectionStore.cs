@@ -9,7 +9,12 @@ public static class ConnectionStore
         Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
         "IRCClient", "connections.json");
 
-    public static List<SavedConnection> Load()
+    public static List<SavedConnection> Load() => LoadOrNull() ?? [];
+
+    // Null means the file is there but could not be read or parsed — which is
+    // not the same as "there are no connections". Callers about to write must
+    // tell those apart, or a bad read turns into an overwrite of good data.
+    public static List<SavedConnection>? LoadOrNull()
     {
         try
         {
@@ -19,7 +24,7 @@ public static class ConnectionStore
         }
         catch
         {
-            return [];
+            return null;
         }
     }
 
@@ -32,7 +37,14 @@ public static class ConnectionStore
             var dir = Path.GetDirectoryName(FilePath)!;
             Directory.CreateDirectory(dir);
             var json = JsonSerializer.Serialize(connections, new JsonSerializerOptions { WriteIndented = true });
-            File.WriteAllText(FilePath, json);
+
+            // Write beside the real file and swap it in, so a crash or a full
+            // disk mid-write leaves the previous file intact rather than a
+            // half-written one.
+            var temp = FilePath + ".tmp";
+            File.WriteAllText(temp, json);
+            if (File.Exists(FilePath)) File.Replace(temp, FilePath, null);
+            else File.Move(temp, FilePath);
             return true;
         }
         catch

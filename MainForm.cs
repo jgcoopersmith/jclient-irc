@@ -1554,12 +1554,10 @@ public partial class MainForm : Form
         _newConnBtn.Click += (s, e) =>
         {
             using var dlg = new ConnectionEditForm(null);
-            if (dlg.ShowDialog(this) == DialogResult.OK)
-            {
-                _savedConnections.Add(dlg.Result);
-                WarnIfSaveFailed(ConnectionStore.Save(_savedConnections));
-                RefreshConnList(_savedConnections.Count - 1);
-            }
+            if (dlg.ShowDialog(this) != DialogResult.OK) return;
+            var added = dlg.Result;
+            ApplyToStoredConnections(list => list.Add(added));
+            RefreshConnList(_savedConnections.FindIndex(c => c.Name == added.Name));
         };
 
         _editConnBtn.Click += (s, e) => EditSelected();
@@ -1569,27 +1567,65 @@ public partial class MainForm : Form
             int idx = _connList.SelectedIndex;
             if (idx < 0) return;
             var name = _savedConnections[idx].Name;
+            // Deleting a connection cannot be undone, so the default button is
+            // No: a stray Enter on this dialog must not destroy an entry.
             var confirm = MessageBox.Show(this, $"Delete connection \"{name}\"?", "Confirm Delete",
-                MessageBoxButtons.YesNo, MessageBoxIcon.Question);
+                MessageBoxButtons.YesNo, MessageBoxIcon.Question, MessageBoxDefaultButton.Button2);
             if (confirm != DialogResult.Yes) return;
 
-            _savedConnections.RemoveAt(idx);
-            WarnIfSaveFailed(ConnectionStore.Save(_savedConnections));
+            ApplyToStoredConnections(list =>
+            {
+                int at = list.FindIndex(c => c.Name == name);
+                if (at >= 0) list.RemoveAt(at);
+            });
             RefreshConnList();
         };
+    }
+
+    // Every write used to dump this process's whole list over the file, so an
+    // instance holding a stale list would silently drop whatever it hadn't
+    // loaded — another window's additions, or a file restored underneath it.
+    // The change is applied to what is on disk *now* instead, and our own list
+    // is refreshed from the result.
+    private void ApplyToStoredConnections(Action<List<SavedConnection>> change)
+    {
+        var current = ConnectionStore.LoadOrNull();
+
+        // Unreadable is not the same as empty. Writing over a file we failed to
+        // parse is exactly how a bad read becomes lost connections.
+        if (current == null)
+        {
+            MessageBox.Show(this,
+                "The saved connections file could not be read, so the change was not saved.\n\n" +
+                "Nothing has been overwritten. Close the client and check:\n" +
+                Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
+                             "IRCClient", "connections.json"),
+                "Not Saved", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            return;
+        }
+
+        change(current);
+        WarnIfSaveFailed(ConnectionStore.Save(current));
+        _savedConnections = current;
     }
 
     private void EditSelected()
     {
         int idx = _connList.SelectedIndex;
         if (idx < 0) return;
-        using var dlg = new ConnectionEditForm(_savedConnections[idx]);
-        if (dlg.ShowDialog(this) == DialogResult.OK)
+        var original = _savedConnections[idx];
+        using var dlg = new ConnectionEditForm(original);
+        if (dlg.ShowDialog(this) != DialogResult.OK) return;
+
+        var edited = dlg.Result;
+        ApplyToStoredConnections(list =>
         {
-            _savedConnections[idx] = dlg.Result;
-            WarnIfSaveFailed(ConnectionStore.Save(_savedConnections));
-            RefreshConnList(idx);
-        }
+            // Match the entry as it was on disk; append if it isn't there
+            int at = list.FindIndex(c => c.Name == original.Name);
+            if (at >= 0) list[at] = edited;
+            else list.Add(edited);
+        });
+        RefreshConnList(_savedConnections.FindIndex(c => c.Name == edited.Name));
     }
 
     private void WarnIfSaveFailed(bool saveSucceeded)
