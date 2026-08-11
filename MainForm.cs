@@ -357,7 +357,18 @@ public partial class MainForm : Form
     private readonly TableLayoutPanel _mainLayout = new() { Dock = DockStyle.Fill, RowCount = 2, ColumnCount = 1 };
     private readonly TabControl _tabs = new() { Dock = DockStyle.Fill };
     private readonly Panel _inputPanel = new() { Dock = DockStyle.Fill };
-    private readonly TextBox _inputBox = new() { Dock = DockStyle.Fill, Font = new Font("Consolas", 10) };
+    // A RichTextBox rather than a TextBox so misspellings can be marked in
+    // place. Single-line, and with the built-in URL detection off, it behaves
+    // like the plain box it replaced.
+    private readonly RichTextBox _inputBox = new()
+    {
+        Dock = DockStyle.Fill,
+        Font = new Font("Consolas", 10),
+        Multiline = false,
+        DetectUrls = false,
+        ScrollBars = RichTextBoxScrollBars.None,
+        BorderStyle = BorderStyle.Fixed3D
+    };
     private readonly Button _sendBtn = new() { Text = "Send", Dock = DockStyle.Right };
     private readonly StatusStrip _status = new();
     private readonly ToolStripStatusLabel _statusLabel = new() { Text = "Disconnected" };
@@ -946,18 +957,25 @@ public partial class MainForm : Form
 
         // Right-click context menu on input box (cut/copy/paste/select all)
         var inputMenu = new ContextMenuStrip();
-        inputMenu.Items.Add("Cut",    null, (s, e) => _inputBox.Cut());
-        inputMenu.Items.Add("Copy",   null, (s, e) => _inputBox.Copy());
-        inputMenu.Items.Add("Paste",  null, (s, e) => PasteIntoInput());
+        // Held by name, not by index: spelling suggestions are inserted above
+        // these, which would shift any index-based lookup onto the wrong item.
+        var cutItem = new ToolStripMenuItem("Cut", null, (s, e) => _inputBox.Cut());
+        var copyItem = new ToolStripMenuItem("Copy", null, (s, e) => _inputBox.Copy());
+        var pasteItem = new ToolStripMenuItem("Paste", null, (s, e) => PasteIntoInput());
+        inputMenu.Items.Add(cutItem);
+        inputMenu.Items.Add(copyItem);
+        inputMenu.Items.Add(pasteItem);
         inputMenu.Items.Add(new ToolStripSeparator());
         inputMenu.Items.Add("Select All", null, (s, e) => _inputBox.SelectAll());
         inputMenu.Opening += (s, e) =>
         {
-            inputMenu.Items[0].Enabled = _inputBox.SelectionLength > 0;
-            inputMenu.Items[1].Enabled = _inputBox.SelectionLength > 0;
-            inputMenu.Items[2].Enabled = Clipboard.ContainsText();
+            AddSpellingSuggestions(inputMenu);
+            cutItem.Enabled = _inputBox.SelectionLength > 0;
+            copyItem.Enabled = _inputBox.SelectionLength > 0;
+            pasteItem.Enabled = Clipboard.ContainsText();
         };
         _inputBox.ContextMenuStrip = inputMenu;
+        WireSpellCheck();
 
         // Apply persisted View settings
         TopMost = _settings.KeepOnTop;
@@ -2882,6 +2900,135 @@ public partial class MainForm : Form
     // The input box is single-line, so a pasted block would otherwise arrive as
     // one run-together line. Split it and send a line at a time instead; flood
     // protection (if on) paces them.
+    // --- Spell checking on the input line --------------------------------
+    // Marking is done by re-colouring the box's text, which itself raises
+    // TextChanged; this guards against re-entering. The check runs on a short
+    // timer so it happens once the typing pauses rather than per keystroke.
+    private bool _spellMarking;
+    private System.Windows.Forms.Timer? _spellTimer;
+    // Words the menu's Ignore was used on, kept for the session
+    private readonly HashSet<string> _spellIgnored = new(StringComparer.OrdinalIgnoreCase);
+
+    private void WireSpellCheck()
+    {
+        if (!SpellCheck.Available) return;
+
+        _spellTimer = new System.Windows.Forms.Timer { Interval = 400 };
+        _spellTimer.Tick += (s, e) => { _spellTimer!.Stop(); MarkMisspellings(); };
+        _inputBox.TextChanged += (s, e) =>
+        {
+            if (_spellMarking) return;
+            _spellTimer!.Stop();
+            _spellTimer.Start();
+        };
+    }
+
+    // Commands are not prose: "/join #chan" shouldn't come back covered in red.
+    private static bool IsCheckable(string text) => !text.StartsWith('/');
+
+    private void MarkMisspellings()
+    {
+        if (!SpellCheck.Available || _spellMarking) return;
+
+        var text = _inputBox.Text;
+        var errors = IsCheckable(text)
+            ? SpellCheck.Check(text).Where(m => !_spellIgnored.Contains(text.Substring(m.Start, m.Length))).ToList()
+            : [];
+
+        _spellMarking = true;
+        int caret = _inputBox.SelectionStart, selLen = _inputBox.SelectionLength;
+        try
+        {
+            _inputBox.SelectAll();
+            _inputBox.SelectionColor = _inputBox.ForeColor;
+            _inputBox.SelectionFont = _inputBox.Font;
+
+            foreach (var m in errors)
+            {
+                if (m.Start + m.Length > text.Length) continue;
+                _inputBox.Select(m.Start, m.Length);
+                _inputBox.SelectionColor = Color.OrangeRed;
+                _inputBox.SelectionFont = new Font(_inputBox.Font, FontStyle.Underline);
+            }
+        }
+        finally
+        {
+            _inputBox.Select(caret, selLen);
+            // Anything typed next is normal text again, not a continuation of
+            // whatever run the caret happens to sit at the end of.
+            if (selLen == 0)
+            {
+                _inputBox.SelectionColor = _inputBox.ForeColor;
+                _inputBox.SelectionFont = _inputBox.Font;
+            }
+            _spellMarking = false;
+        }
+    }
+
+    // The misspelled word under the mouse, as (word, start, length)
+    private (string Word, int Start, int Length)? MisspellingAtCursor()
+    {
+        if (!SpellCheck.Available) return null;
+        var text = _inputBox.Text;
+        if (!IsCheckable(text)) return null;
+
+        int index = _inputBox.GetCharIndexFromPosition(_inputBox.PointToClient(Cursor.Position));
+        foreach (var m in SpellCheck.Check(text))
+        {
+            if (index < m.Start || index > m.Start + m.Length) continue;
+            var word = text.Substring(m.Start, m.Length);
+            if (_spellIgnored.Contains(word)) continue;
+            return (word, m.Start, m.Length);
+        }
+        return null;
+    }
+
+    // Puts suggestions for the word under the cursor at the top of the input
+    // box's menu, above Cut/Copy/Paste, and clears them again next time.
+    private void AddSpellingSuggestions(ContextMenuStrip menu)
+    {
+        foreach (var item in menu.Items.Cast<ToolStripItem>().Where(i => i.Tag as string == "spell").ToList())
+            menu.Items.Remove(item);
+
+        var hit = MisspellingAtCursor();
+        if (hit == null) return;
+        var (word, start, length) = hit.Value;
+
+        int at = 0;
+        void Insert(ToolStripItem item)
+        {
+            item.Tag = "spell";
+            menu.Items.Insert(at++, item);
+        }
+
+        foreach (var suggestion in SpellCheck.Suggest(word).Take(5))
+        {
+            var replacement = suggestion;
+            Insert(new ToolStripMenuItem(replacement, null, (s, e) =>
+            {
+                _spellMarking = true;
+                _inputBox.Select(start, length);
+                _inputBox.SelectedText = replacement;
+                _inputBox.SelectionStart = start + replacement.Length;
+                _inputBox.SelectionLength = 0;
+                _spellMarking = false;
+                MarkMisspellings();
+            }) { Font = new Font(menu.Font, FontStyle.Bold) });
+        }
+
+        Insert(new ToolStripMenuItem($"Add \"{word}\" to Dictionary", null, (s, e) =>
+        {
+            SpellCheck.Add(word);
+            MarkMisspellings();
+        }));
+        Insert(new ToolStripMenuItem($"Ignore \"{word}\"", null, (s, e) =>
+        {
+            _spellIgnored.Add(word);
+            MarkMisspellings();
+        }));
+        Insert(new ToolStripSeparator());
+    }
+
     // Clipboard text as sendable lines: blank lines dropped, line endings
     // normalised. Empty when the clipboard is busy or holds something else.
     private static List<string> ClipboardLines()
