@@ -342,6 +342,28 @@ public partial class MainForm : Form
         UpdateAllHeaders();
     }
 
+    // The item last clicked anywhere in the menus. Closing only says why it is
+    // closing, not what was clicked, so the two are matched up here.
+    private ToolStripItem? _menuClickedItem;
+
+    // Keeps a menu open when the click was a checkbox, while items that do
+    // something — open a dialog, run a command — still close it as usual.
+    // Applied down the whole chain: cancelling a submenu's close does nothing
+    // if its parent closes anyway.
+    private void KeepMenuOpenOnToggle(ToolStripDropDownItem item)
+    {
+        item.DropDown.ItemClicked += (s, e) => _menuClickedItem = e.ClickedItem;
+        item.DropDown.Closing += (s, e) =>
+        {
+            if (e.CloseReason == ToolStripDropDownCloseReason.ItemClicked
+                && _menuClickedItem is ToolStripMenuItem { CheckOnClick: true })
+                e.Cancel = true;
+        };
+
+        foreach (var child in item.DropDownItems.OfType<ToolStripDropDownItem>())
+            KeepMenuOpenOnToggle(child);
+    }
+
     // Version as shown in About: Application.ProductVersion minus the SDK's
     // "+commithash" suffix. Used for the quit message and CTCP VERSION replies.
     private static string VersionString
@@ -707,6 +729,12 @@ public partial class MainForm : Form
         _menu.Items.Add(toolsMenu);
 
         MainMenuStrip = _menu;
+
+        // Ticking a checkbox shouldn't dismiss the menu you are working in —
+        // these settings often get changed together. Wired after every menu
+        // exists, so the whole tree is covered.
+        foreach (var top in _menu.Items.OfType<ToolStripDropDownItem>())
+            KeepMenuOpenOnToggle(top);
 
         // Drag bar between the connection library and the chat area. The nick
         // list has had one of these on the right since it was added; this gives
