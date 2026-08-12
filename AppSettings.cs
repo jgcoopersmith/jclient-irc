@@ -32,6 +32,11 @@ public class AppSettings
     // mIRC-style aliases, one per line: "/name commands" (see Tools > Alias).
     public string Aliases { get; set; } = "";
 
+    // Sends a PING to the server every 60 seconds so an idle connection isn't
+    // dropped by a router or the server's own idle timeout (File > Options >
+    // Connect).
+    public bool KeepAlive { get; set; } = true;
+
     // Paces our own outgoing lines so the server doesn't kill us for excess
     // flood (File > Options > Flood). On by default: the failure it prevents
     // is a disconnect, and the cost is a short delay on long pastes.

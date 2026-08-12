@@ -486,8 +486,20 @@ public partial class MainForm : Form
             _settings.MinimizeToTrayOnClose = minimizeToTrayItem.Checked;
             SettingsStore.Save(_settings);
         };
+        var keepAliveItem = new ToolStripMenuItem("Keep alive (PING every 60s)")
+        {
+            CheckOnClick = true,
+            Checked = _settings.KeepAlive
+        };
+        keepAliveItem.CheckedChanged += (s, e) =>
+        {
+            _settings.KeepAlive = keepAliveItem.Checked;
+            SettingsStore.Save(_settings);
+            UpdateKeepAliveTimer();
+        };
         connectOptions.DropDownItems.Add(connectOnStartupItem);
         connectOptions.DropDownItems.Add(reconnectOnDisconnectItem);
+        connectOptions.DropDownItems.Add(keepAliveItem);
         connectOptions.DropDownItems.Add(minimizeToTrayItem);
         connectOptions.DropDownItems.Add(new ToolStripSeparator());
         connectOptions.DropDownItems.Add(versionReplyItem);
@@ -2406,6 +2418,38 @@ public partial class MainForm : Form
         catch { }
     }
 
+    // --- Keep alive -------------------------------------------------------
+    // A PING to the server on a timer. An idle IRC connection can be dropped
+    // by a NAT/router long before either end notices; a line every 60 seconds
+    // keeps it live and surfaces a dead link as a failed write.
+    private System.Windows.Forms.Timer? _keepAliveTimer;
+
+    private void UpdateKeepAliveTimer()
+    {
+        bool wanted = _settings.KeepAlive && _irc is { IsConnected: true };
+
+        if (!wanted)
+        {
+            _keepAliveTimer?.Stop();
+            return;
+        }
+
+        _keepAliveTimer ??= new System.Windows.Forms.Timer { Interval = 60_000 };
+        _keepAliveTimer.Tick -= KeepAliveTick;
+        _keepAliveTimer.Tick += KeepAliveTick;
+        _keepAliveTimer.Start();
+    }
+
+    private void KeepAliveTick(object? sender, EventArgs e)
+    {
+        if (_irc is not { IsConnected: true }) { _keepAliveTimer?.Stop(); return; }
+
+        // Sent ahead of the flood queue, like PONG: housekeeping shouldn't wait
+        // behind a paste, and the reply is a PONG the server sends back.
+        var target = _activeServer ?? _irc.CurrentNick ?? "jclient";
+        _ = _irc.SendRawAsync($"PING :{target}", urgent: true);
+    }
+
     // Which connection's nicks we are working through, and how far down the
     // list: 0 = the nick itself (already tried), 1 = the alt nick, 2+ = the
     // nick with four random digits.
@@ -2464,6 +2508,7 @@ public partial class MainForm : Form
             _activeServer = null;
             _replyTarget = null;
             SetConnectionLost(true);
+            _keepAliveTimer?.Stop();
             UpdateAllHeaders();
             AppendLine("(server)", "*** Disconnected", Color.Orange);
             if (_settings.ReconnectOnDisconnect)
@@ -2479,6 +2524,7 @@ public partial class MainForm : Form
             _disconnectBtn.Enabled = true;
             _activeServer = c.Server;
             SetConnectionLost(false);
+            UpdateKeepAliveTimer();
             UpdateAllHeaders();
         }
         catch (Exception ex)
@@ -2519,6 +2565,7 @@ public partial class MainForm : Form
         _activeServer = null;
         _replyTarget = null;
         SetConnectionLost(true);
+        _keepAliveTimer?.Stop();
         UpdateAllHeaders();
         AppendLine("(server)", "*** Disconnected", Color.Orange);
     }
