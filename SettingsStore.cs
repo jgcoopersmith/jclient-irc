@@ -30,7 +30,16 @@ public static class SettingsStore
         {
             var dir = Path.GetDirectoryName(FilePath)!;
             Directory.CreateDirectory(dir);
-            File.WriteAllText(FilePath, JsonSerializer.Serialize(settings, new JsonSerializerOptions { WriteIndented = true }));
+            var json = JsonSerializer.Serialize(settings, new JsonSerializerOptions { WriteIndented = true });
+
+            // Written beside the real file and swapped in. Settings are saved
+            // often — every window move, every toggle — so a crash landing
+            // mid-write is a real possibility, and a half-written file would
+            // lose the lot.
+            var temp = FilePath + ".tmp";
+            File.WriteAllText(temp, json);
+            if (File.Exists(FilePath)) File.Replace(temp, FilePath, null);
+            else File.Move(temp, FilePath);
         }
         catch { }
     }

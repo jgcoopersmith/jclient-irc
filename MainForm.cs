@@ -3655,19 +3655,37 @@ public partial class MainForm : Form
         if (_settings.WindowWidth <= 0 || _settings.WindowHeight <= 0) return;
 
         var saved = new Rectangle(_settings.WindowX, _settings.WindowY,
-                                  _settings.WindowWidth, _settings.WindowHeight);
+                                  Math.Max(_settings.WindowWidth, MinimumSize.Width),
+                                  Math.Max(_settings.WindowHeight, MinimumSize.Height));
 
-        // A monitor that has since been unplugged (or rearranged) would put the
-        // window somewhere unreachable, so only honour a position still on a
-        // screen. Size is kept either way.
-        bool onScreen = Screen.AllScreens.Any(s => s.WorkingArea.IntersectsWith(saved));
-        StartPosition = onScreen ? FormStartPosition.Manual : FormStartPosition.WindowsDefaultLocation;
-        if (onScreen) Location = saved.Location;
-        Size = new Size(Math.Max(saved.Width, MinimumSize.Width),
-                        Math.Max(saved.Height, MinimumSize.Height));
+        var placed = EnsureOnScreen(saved);
+        StartPosition = FormStartPosition.Manual;
+        Bounds = placed;
 
         if (_settings.WindowMaximized) WindowState = FormWindowState.Maximized;
         _placementRestored = true;
+    }
+
+    // Pulls a saved rectangle back onto a real monitor. A saved position can be
+    // unusable for several reasons — the monitor it was on is gone, the screens
+    // were rearranged, or it was left mostly past an edge — and merely touching
+    // a screen isn't enough: a window whose title bar sits above the top edge
+    // can't be moved back by the user.
+    private static Rectangle EnsureOnScreen(Rectangle r)
+    {
+        // The screen holding most of the rectangle, or the primary one when it
+        // touches none of them.
+        var area = Screen.FromRectangle(r).WorkingArea;
+
+        r.Width = Math.Min(r.Width, area.Width);
+        r.Height = Math.Min(r.Height, area.Height);
+
+        if (r.Right > area.Right) r.X = area.Right - r.Width;
+        if (r.Bottom > area.Bottom) r.Y = area.Bottom - r.Height;
+        if (r.X < area.X) r.X = area.X;
+        if (r.Y < area.Y) r.Y = area.Y;
+
+        return r;
     }
 
     private void SchedulePlacementSave()
