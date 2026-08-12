@@ -3750,6 +3750,24 @@ public partial class MainForm : Form
             return;
         }
 
+        // Ask before quitting for real. Only for a close the user asked for:
+        // a Windows shutdown or log off must not be held up by a dialog, and
+        // an explicit /quit has already said what was wanted.
+        if (!_explicitQuit && e.CloseReason is CloseReason.UserClosing or CloseReason.None)
+        {
+            var connected = _irc is { IsConnected: true };
+            var message = connected && _activeServer != null
+                ? $"Exit jclient and disconnect from {_activeServer}?"
+                : "Exit jclient?";
+            if (MessageBox.Show(this, message, "Exit", MessageBoxButtons.YesNo,
+                                MessageBoxIcon.Question) != DialogResult.Yes)
+            {
+                e.Cancel = true;
+                _exitFromTray = false; // a cancelled tray Exit shouldn't arm the next close
+                return;
+            }
+        }
+
         _closing = true;
         // Closing the window by any means sends a proper "QUIT :jclient" so the
         // server sees a clean quit rather than a dropped socket — unless the user
