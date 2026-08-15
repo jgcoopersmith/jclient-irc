@@ -3037,6 +3037,7 @@ public partial class MainForm : Form
 
         var text = _inputBox.Text.Trim();
         _inputBox.Clear();
+        _lastCorrection = null; // the line is gone; nothing left to overrule
 
         // Record in command history (skip consecutive duplicates) and reset the
         // Up/Down browse position to "past the newest entry". Done before the
@@ -3179,9 +3180,22 @@ public partial class MainForm : Form
             && text.Substring(last.Start, last.Fixed.Length) == last.Fixed)
             return; // our correction is still standing
 
-        // It was changed — back to the original or to something else entirely.
-        // Either way the user has decided how that word is spelt.
-        _autoCorrectOff.Add(last.Original);
+        // Sending clears the box, which is not the user rejecting anything —
+        // treating it as such retired the correction after its first use.
+        if (text.Length == 0)
+        {
+            _lastCorrection = null;
+            return;
+        }
+
+        // Only count it as overruled when the original spelling has been put
+        // back, which is the case that would otherwise be corrected again and
+        // again. Any other edit just ends the watch.
+        if (last.Start + last.Original.Length <= text.Length
+            && string.Equals(text.Substring(last.Start, last.Original.Length), last.Original,
+                             StringComparison.OrdinalIgnoreCase))
+            _autoCorrectOff.Add(last.Original);
+
         _lastCorrection = null;
     }
 
