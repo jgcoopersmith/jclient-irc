@@ -1842,11 +1842,41 @@ public partial class MainForm : Form
     // the run of non-whitespace around that character, then stripped of the
     // punctuation people habitually write after a link ("see http://x.com, it's
     // good") and of a wrapping pair of brackets.
-    private static string? UrlAt(RichTextBox log, Point p)
+    // Cached copy of each log's text. RichTextBox.Text marshals the whole
+    // scrollback out of the native control every time it is read, which is far
+    // too expensive to do on each mouse move over a busy channel.
+    private readonly Dictionary<RichTextBox, string> _logTextCache = [];
+
+    private string LogText(RichTextBox log)
+    {
+        if (!_logTextCache.TryGetValue(log, out var text))
+            _logTextCache[log] = text = log.Text;
+        return text;
+    }
+
+    // True when the point is actually on the character, not merely nearest to
+    // it. GetCharIndexFromPosition snaps to the closest character, so blank
+    // space to the right of a line reports that line's last character — which
+    // put a hand cursor well away from any link.
+    private static bool PointIsOnChar(RichTextBox log, Point p, int index)
+    {
+        var pos = log.GetPositionFromCharIndex(index);
+        int lineHeight = Math.Max(log.Font.Height, 1);
+        if (p.Y < pos.Y || p.Y > pos.Y + lineHeight) return false;
+
+        // Width of this character, from where the next one starts; a character
+        // ending the line has no next position on the same row to measure by.
+        var next = log.GetPositionFromCharIndex(index + 1);
+        int width = next.Y == pos.Y && next.X > pos.X ? next.X - pos.X : lineHeight;
+        return p.X >= pos.X - 1 && p.X <= pos.X + width;
+    }
+
+    private string? UrlAt(RichTextBox log, Point p)
     {
         int i = log.GetCharIndexFromPosition(p);
-        var text = log.Text;
+        var text = LogText(log);
         if (i < 0 || i >= text.Length || char.IsWhiteSpace(text[i])) return null;
+        if (!PointIsOnChar(log, p, i)) return null;
 
         int start = i, end = i;
         while (start > 0 && !char.IsWhiteSpace(text[start - 1])) start--;
@@ -1882,9 +1912,26 @@ public partial class MainForm : Form
         // built-in detection off.
         log.DetectUrls = false;
 
-        // A hand cursor is the only cue that the blue underlined run is live
+        // Appending invalidates the cached text the hover test reads
+        log.TextChanged += (s, e) => _logTextCache.Remove(log);
+
+        // A hand cursor is the only cue that the blue underlined run is live.
+        // The work is skipped while the pointer stays on the same character,
+        // and the cursor is only assigned when it actually changes — setting it
+        // on every mouse move made the pointer flicker.
+        int lastCharIndex = -1;
+        bool lastWasUrl = false;
         log.MouseMove += (s, e) =>
-            log.Cursor = UrlAt(log, e.Location) != null ? Cursors.Hand : Cursors.Default;
+        {
+            int i = log.GetCharIndexFromPosition(e.Location);
+            if (i == lastCharIndex) return;
+            lastCharIndex = i;
+
+            bool isUrl = UrlAt(log, e.Location) != null;
+            if (isUrl == lastWasUrl) return;
+            lastWasUrl = isUrl;
+            log.Cursor = isUrl ? Cursors.Hand : Cursors.Default;
+        };
 
         log.MouseUp += (s, e) =>
         {
